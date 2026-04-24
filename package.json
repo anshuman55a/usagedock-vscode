@@ -5,6 +5,11 @@
   "version": "0.1.0",
   "publisher": "usagedock",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anshuman55a/usagedock-vscode.git",
+    "directory": "usagedock-vscode"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
