@@ -3,7 +3,7 @@
   "displayName": "UsageDock",
   "description": "Track AI coding tool usage (Cursor, Claude, Copilot, Codex, Windsurf) without leaving VS Code.",
   "version": "0.1.0",
-  "publisher": "usagedock",
+  "publisher": "anshuman55a",
   "license": "MIT",
   "repository": {
     "type": "git",
