@@ -1,0 +1,128 @@
+{
+  "name": "usagedock",
+  "displayName": "UsageDock",
+  "description": "Track AI coding tool usage (Cursor, Claude, Copilot, Codex, Windsurf) without leaving VS Code.",
+  "version": "0.1.0",
+  "publisher": "usagedock",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "usage",
+    "cursor",
+    "claude",
+    "copilot",
+    "codex",
+    "windsurf",
+    "tracking",
+    "monitor"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "icon": "resources/icon.png",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "usagedock",
+          "title": "UsageDock",
+          "icon": "resources/bolt.svg"
+        }
+      ]
+    },
+    "views": {
+      "usagedock": [
+        {
+          "type": "webview",
+          "id": "usagedock.panel",
+          "name": "Usage"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "usagedock.refreshAll",
+        "title": "UsageDock: Refresh All Providers",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "usagedock.openPanel",
+        "title": "UsageDock: Open Panel"
+      },
+      {
+        "command": "usagedock.openSettings",
+        "title": "UsageDock: Open Settings",
+        "icon": "$(gear)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "usagedock.refreshAll",
+          "when": "view == usagedock.panel",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "UsageDock",
+      "properties": {
+        "usagedock.autoRefresh.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically refresh provider usage at a regular interval."
+        },
+        "usagedock.autoRefresh.intervalMinutes": {
+          "type": "number",
+          "default": 15,
+          "enum": [5, 10, 15, 30, 60],
+          "description": "Auto-refresh interval in minutes."
+        },
+        "usagedock.refreshOnOpen": {
+          "type": "boolean",
+          "default": false,
+          "description": "Refresh provider usage when the UsageDock sidebar view opens."
+        },
+        "usagedock.statusBar.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show UsageDock status in the VS Code status bar."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "npm run build:ext && npm run build:webview",
+    "build:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:better-sqlite3 --format=cjs --platform=node --target=node18 --sourcemap",
+    "build:webview": "vite build --config vite.config.webview.ts",
+    "watch": "concurrently \"npm run watch:ext\" \"npm run watch:webview\"",
+    "watch:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:better-sqlite3 --format=cjs --platform=node --target=node18 --sourcemap --watch",
+    "watch:webview": "vite build --config vite.config.webview.ts --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@types/vscode": "^1.85.0",
+    "concurrently": "^9.1.0",
+    "esbuild": "^0.24.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "@vitejs/plugin-react": "^4.3.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0"
+  }
+}
