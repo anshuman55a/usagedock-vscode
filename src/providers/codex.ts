@@ -30,9 +30,9 @@ async function refreshToken(tok: string): Promise<string> {
   });
   if (resp.status === 400 || resp.status === 401) { throw new Error('Session expired. Run `codex` to log in again.'); }
   if (!resp.ok) { throw new Error(`Token refresh failed (HTTP ${resp.status})`); }
-  const d = await resp.json();
-  if (!d.access_token) { throw new Error('No access token in refresh response'); }
-  return d.access_token;
+  const d = await resp.json() as Record<string, unknown>;
+  if (!d['access_token']) { throw new Error('No access token in refresh response'); }
+  return d['access_token'] as string;
 }
 
 export async function probeCodex(): Promise<{ plan?: string | null; lines: MetricLine[] }> {
@@ -56,7 +56,8 @@ export async function probeCodex(): Promise<{ plan?: string | null; lines: Metri
   for (const k of ['x-codex-primary-used-percent', 'x-codex-secondary-used-percent', 'x-codex-credits-balance']) {
     const v = resp.headers.get(k); if (v) { rh[k] = v; }
   }
-  const data = await resp.json();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data = await resp.json() as any;
   const lines: MetricLine[] = [];
 
   const sessionPct = rh['x-codex-primary-used-percent'] ? parseFloat(rh['x-codex-primary-used-percent']) : data?.rate_limit?.primary_window?.used_percent ?? null;

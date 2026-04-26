@@ -30,11 +30,11 @@ async function refreshAccessToken(refreshTok: string): Promise<string> {
     throw new Error(`Token refresh failed (HTTP ${resp.status})`);
   }
 
-  const body = await resp.json();
-  if (!body.access_token) {
+  const body = await resp.json() as Record<string, unknown>;
+  if (!body['access_token']) {
     throw new Error('No access token in refresh response');
   }
-  return body.access_token;
+  return body['access_token'] as string;
 }
 
 async function fetchUsage(accessToken: string): Promise<any> {

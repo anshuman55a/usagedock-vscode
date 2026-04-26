@@ -1,3 +1,4 @@
+import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import type { MetricLine } from './types';
@@ -9,6 +10,42 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+// ── Token sources (ordered by preference) ─────────────────────────
+
+/**
+ * 1️⃣  VS Code's built-in GitHub authentication.
+ *
+ * If the user has GitHub Copilot authenticated inside VS Code, a session
+ * with the `copilot` scope already exists. We ask for it silently first
+ * (no UI at all), then with `createIfNone: false` which may show a small
+ * consent banner but won't launch a full sign-in flow.
+ */
+async function loadTokenFromVscodeAuth(): Promise<string | null> {
+  try {
+    // Silent check — returns a session only if previously approved for this extension.
+    let session = await vscode.authentication.getSession('github', ['copilot'], {
+      silent: true,
+    });
+
+    if (!session) {
+      // Non-silent, non-creating check — may show a small "Allow" banner if
+      // a GitHub session exists but hasn't been consented for UsageDock yet.
+      // Does NOT open a full sign-in dialog.
+      session = await vscode.authentication.getSession('github', ['copilot'], {
+        createIfNone: false,
+      });
+    }
+
+    return session?.accessToken ?? null;
+  } catch {
+    // Authentication provider not available or user dismissed — not an error.
+    return null;
+  }
+}
+
+/**
+ * 2️⃣  Read the oauth_token from GitHub CLI's hosts.yml config file.
+ */
 function loadTokenFromHostsFile(): string | null {
   const hostsPath = getGhHostsPath();
   if (!hostsPath || !fs.existsSync(hostsPath)) {
@@ -27,15 +64,14 @@ function loadTokenFromHostsFile(): string | null {
   return null;
 }
 
+/**
+ * 3️⃣  Shell out to `gh auth token` (requires GitHub CLI installed + authenticated).
+ */
 function loadTokenFromGhCli(): Promise<string> {
   return new Promise((resolve, reject) => {
     const ghPath = getGhExecutablePath();
     if (!ghPath) {
-      reject(
-        new Error(
-          'No trusted GitHub CLI executable found. Install GitHub CLI and run `gh auth login` first.',
-        ),
-      );
+      reject(new Error('GitHub CLI not found'));
       return;
     }
 
@@ -46,12 +82,12 @@ function loadTokenFromGhCli(): Promise<string> {
 
     execFile(ghPath, ['auth', 'token', '--hostname', 'github.com'], options, (err, stdout) => {
       if (err) {
-        reject(new Error('No GitHub token found. Run `gh auth login` first.'));
+        reject(new Error('gh auth token failed'));
         return;
       }
-      const token = stdout.trim();
+      const token = String(stdout).trim();
       if (!token) {
-        reject(new Error('No GitHub token found. Run `gh auth login` first.'));
+        reject(new Error('gh returned empty token'));
         return;
       }
       resolve(token);
@@ -59,13 +95,34 @@ function loadTokenFromGhCli(): Promise<string> {
   });
 }
 
+// ── Combined token loader ─────────────────────────────────────────
+
 async function loadToken(): Promise<string> {
+  // 1. VS Code's GitHub authentication (zero-friction for Copilot users)
+  const vscodeToken = await loadTokenFromVscodeAuth();
+  if (vscodeToken) {
+    return vscodeToken;
+  }
+
+  // 2. GitHub CLI hosts.yml
   const fileToken = loadTokenFromHostsFile();
   if (fileToken) {
     return fileToken;
   }
-  return loadTokenFromGhCli();
+
+  // 3. GitHub CLI executable
+  try {
+    return await loadTokenFromGhCli();
+  } catch {
+    // All methods exhausted
+  }
+
+  throw new Error(
+    'Not authenticated. Sign in to GitHub in VS Code (Accounts menu) or run `gh auth login`.',
+  );
 }
+
+// ── Usage API ─────────────────────────────────────────────────────
 
 async function fetchUsage(token: string): Promise<any> {
   const resp = await fetch(USAGE_URL, {
@@ -82,13 +139,17 @@ async function fetchUsage(token: string): Promise<any> {
   });
 
   if (resp.status === 401 || resp.status === 403) {
-    throw new Error('Token invalid. Run `gh auth login` to re-authenticate.');
+    throw new Error(
+      'GitHub token invalid or lacks Copilot access. Sign in again via the VS Code Accounts menu.',
+    );
   }
   if (!resp.ok) {
     throw new Error(`Usage request failed (HTTP ${resp.status})`);
   }
   return resp.json();
 }
+
+// ── Probe ─────────────────────────────────────────────────────────
 
 export async function probeCopilot(): Promise<{ plan?: string | null; lines: MetricLine[] }> {
   const token = await loadToken();
