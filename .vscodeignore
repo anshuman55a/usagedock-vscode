@@ -3,6 +3,7 @@
 .git/**
 .vscode/**
 src/**
+scripts/**
 webview/**
 tsconfig.json
 vite.config.webview.ts

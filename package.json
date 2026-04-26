@@ -2,7 +2,7 @@
   "name": "usage-dock",
   "displayName": "Usage-Dock",
   "description": "Track AI coding tool usage (Cursor, Claude, Copilot, Codex, Windsurf) without leaving VS Code.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "anshuman55a",
   "license": "MIT",
   "repository": {
@@ -59,7 +59,8 @@
       },
       {
         "command": "usagedock.openPanel",
-        "title": "UsageDock: Open Panel"
+        "title": "UsageDock: Open Panel",
+        "icon": "$(layout-sidebar-left)"
       },
       {
         "command": "usagedock.openSettings",
@@ -106,10 +107,10 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "npm run build:ext && npm run build:webview",
-    "build:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:better-sqlite3 --format=cjs --platform=node --target=node18 --sourcemap",
+    "build:ext": "node ./scripts/build-extension.mjs",
     "build:webview": "vite build --config vite.config.webview.ts",
     "watch": "concurrently \"npm run watch:ext\" \"npm run watch:webview\"",
-    "watch:ext": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:better-sqlite3 --format=cjs --platform=node --target=node18 --sourcemap --watch",
+    "watch:ext": "node ./scripts/build-extension.mjs --watch",
     "watch:webview": "vite build --config vite.config.webview.ts --watch",
     "package": "vsce package"
   },
