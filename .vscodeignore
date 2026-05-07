@@ -9,6 +9,8 @@ tsconfig.json
 vite.config.webview.ts
 package-lock.json
 .gitignore
+debug.log
+debug_db.js
 
 # The extension host and webview are bundled into dist.
 node_modules/**

@@ -2,7 +2,7 @@
 
 Keep your AI coding usage visible without leaving the editor.
 
-UsageDock adds a compact local usage monitor for Cursor, Claude, GitHub Copilot, Codex, and Windsurf directly inside VS Code. It reads the same local auth state and usage signals your tools already use, then presents them in a focused sidebar view and status bar summary.
+UsageDock adds a compact local usage monitor for Cursor, Claude, GitHub Copilot, Codex, Windsurf, and Antigravity directly inside VS Code. It reads supported local auth state and usage signals where allowed, then presents them in a focused sidebar view and status bar summary.
 
 No UsageDock account. No hosted dashboard. No provider credentials sent to a UsageDock backend.
 
@@ -24,6 +24,7 @@ No UsageDock account. No hosted dashboard. No provider credentials sent to a Usa
 | GitHub Copilot | GitHub CLI auth token | `gh auth login` completed |
 | Codex | Local Codex auth state | Codex authenticated locally |
 | Windsurf | Local Windsurf state and language server | Windsurf running and signed in |
+| Antigravity | Local Antigravity auth state and model quota metadata | Antigravity installed and signed in |
 
 Unavailable providers stay visible as connection states so you know what needs attention.
 
@@ -33,6 +34,7 @@ UsageDock is built around a local-first model:
 
 - Provider credentials are read only from local files or local tools already present on your machine.
 - UsageDock does not ask you to paste provider tokens into the extension.
+- Antigravity quota is read from the same non-generating model quota metadata shown in Antigravity > Settings > Models > Model Quota.
 - UsageDock does not operate a hosted backend for usage tracking.
 - Usage data is rendered inside VS Code.
 - Refresh behavior is controlled through VS Code settings.
@@ -62,7 +64,8 @@ UsageDock intentionally does not refresh on open by default. You can change that
   "usagedock.autoRefresh.enabled": false,
   "usagedock.autoRefresh.intervalMinutes": 15,
   "usagedock.refreshOnOpen": false,
-  "usagedock.statusBar.enabled": true
+  "usagedock.statusBar.enabled": true,
+  "usagedock.antigravity.enabled": true
 }
 ```
 
@@ -72,6 +75,7 @@ UsageDock intentionally does not refresh on open by default. You can change that
 | `usagedock.autoRefresh.intervalMinutes` | `15` | Auto-refresh interval. Supported values: `5`, `10`, `15`, `30`, `60`. |
 | `usagedock.refreshOnOpen` | `false` | Refresh when the UsageDock sidebar view opens. |
 | `usagedock.statusBar.enabled` | `true` | Show UsageDock in the VS Code status bar. |
+| `usagedock.antigravity.enabled` | `true` | Show Antigravity model quota tracking. |
 
 ## Commands
 
@@ -85,6 +89,8 @@ Use these from the Command Palette:
 
 - GitHub Copilot usage requires the GitHub CLI to be installed and authenticated.
 - Windsurf usage requires Windsurf to be running so its local language server can be reached.
+- Antigravity quota checks fetch model quota metadata only; they do not send prompts or run generations, so checking quota should not consume quota.
+- Antigravity OAuth refresh is optional and uses `USAGEDOCK_ANTIGRAVITY_GOOGLE_CLIENT_ID` and `USAGEDOCK_ANTIGRAVITY_GOOGLE_CLIENT_SECRET` when present; these values are not bundled in the extension.
 - Remote environments such as SSH, containers, or Codespaces may not have access to the same local provider files as your desktop session.
 
 ## Development

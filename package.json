@@ -1,8 +1,8 @@
 {
   "name": "usage-dock",
   "displayName": "Usage-Dock",
-  "description": "Track AI coding tool usage (Cursor, Claude, Copilot, Codex, Windsurf) without leaving VS Code.",
-  "version": "0.1.1",
+  "description": "Track AI coding tool usage (Cursor, Claude, Copilot, Codex, Windsurf, Antigravity) without leaving VS Code.",
+  "version": "0.1.3",
   "publisher": "anshuman55a",
   "license": "MIT",
   "repository": {
@@ -100,6 +100,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show UsageDock status in the VS Code status bar."
+        },
+        "usagedock.antigravity.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Antigravity model quota from the same non-generating quota metadata used by Antigravity settings."
         }
       }
     }

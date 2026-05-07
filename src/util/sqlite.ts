@@ -12,7 +12,8 @@ export function readDbValue(dbPath: string, key: string): string | null {
       | { value: string }
       | undefined;
     return row?.value ?? null;
-  } catch {
+  } catch (err) {
+    console.error(`UsageDock: readDbValue failed for key="${key}" in ${dbPath}:`, err);
     return null;
   } finally {
     db?.close();

@@ -32,6 +32,13 @@ export const WindsurfIcon = () => (
   </svg>
 );
 
+export const AntigravityIcon = () => (
+  <svg style={iconStyle} viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M50 9 86.5 81H73.2L65.4 65H34.6L26.8 81H13.5L50 9Zm0 27.4L39.5 57.8h21L50 36.4Z" fill="currentColor" />
+    <path d="M50 23.5 77 81h-8.6L62 67.6H38L31.6 81H23L50 23.5Z" fill="currentColor" opacity="0.36" />
+  </svg>
+);
+
 export const PROVIDER_ICONS: Record<string, React.FC> = {
-  cursor: CursorIcon, claude: ClaudeIcon, copilot: CopilotIcon, codex: CodexIcon, windsurf: WindsurfIcon,
+  cursor: CursorIcon, claude: ClaudeIcon, copilot: CopilotIcon, codex: CodexIcon, windsurf: WindsurfIcon, antigravity: AntigravityIcon,
 };

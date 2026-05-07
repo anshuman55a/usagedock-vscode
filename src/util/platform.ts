@@ -49,6 +49,20 @@ export function getWindsurfDbPaths(): string[] {
   return paths;
 }
 
+export function getAntigravityDbPath(): string | null {
+  let base: string | null = null;
+
+  if (process.platform === 'win32') {
+    base = process.env.APPDATA || null;
+  } else if (process.platform === 'linux') {
+    base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  } else {
+    base = path.join(os.homedir(), 'Library', 'Application Support');
+  }
+
+  return base ? path.join(base, 'Antigravity', 'User', 'globalStorage', 'state.vscdb') : null;
+}
+
 export function getClaudeCredentialsPath(): string | null {
   const home = os.homedir();
   return home ? path.join(home, '.claude', '.credentials.json') : null;
