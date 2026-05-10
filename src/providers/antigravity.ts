@@ -30,11 +30,6 @@ const MODEL_BLACKLIST = new Set([
   'MODEL_PLACEHOLDER_M12',
 ]);
 
-interface ProtoFields {
-  get(field: number): Buffer[];
-  getVarint(field: number): number | null;
-}
-
 interface OAuthTokens {
   accessToken: string | null;
   refreshToken: string | null;
@@ -42,9 +37,12 @@ interface OAuthTokens {
 }
 
 interface LsDiscovery {
-  ports: number[];
+  /** All listening ports for the LS process (excluding the extension server port). */
+  lsPorts: number[];
+  /** The --csrf_token value (used for LS gRPC calls). */
   csrf: string;
-  extensionPort?: number | null;
+  /** Fallback: the --extension_server_port itself. */
+  extensionPort: number;
 }
 
 interface ModelConfig {
@@ -56,120 +54,116 @@ interface ModelConfig {
 
 let cachedAccessToken: { token: string; expiresAtMs: number } | null = null;
 
-function readVarint(data: Buffer, start: number): [number, number] | null {
-  let value = 0;
-  let multiplier = 1;
-  let pos = start;
+// ---------------------------------------------------------------------------
+// Protobuf wire-format decoder (operates on binary strings, matching plugin.js)
+// ---------------------------------------------------------------------------
 
-  while (pos < data.length) {
-    const byte = data[pos++];
-    value += (byte & 0x7f) * multiplier;
-    if ((byte & 0x80) === 0) {
-      return [value, pos];
+interface ProtoField {
+  type: number;
+  value?: number;  // varint
+  data?: string;   // length-delimited (binary string)
+}
+
+function readVarint(s: string, pos: number): { v: number; p: number } | null {
+  let v = 0;
+  let shift = 0;
+  while (pos < s.length) {
+    const b = s.charCodeAt(pos++);
+    v += (b & 0x7f) * Math.pow(2, shift);
+    if ((b & 0x80) === 0) {
+      return { v, p: pos };
     }
-    multiplier *= 128;
-    if (multiplier > Number.MAX_SAFE_INTEGER / 128) {
-      return null;
-    }
+    shift += 7;
   }
-
   return null;
 }
 
-function readProtoFields(data: Buffer): ProtoFields {
-  const fields = new Map<number, Buffer[]>();
-  const varints = new Map<number, number[]>();
+function readFields(s: string): Record<number, ProtoField> {
+  const fields: Record<number, ProtoField> = {};
   let pos = 0;
-
-  while (pos < data.length) {
-    const tag = readVarint(data, pos);
+  while (pos < s.length) {
+    const tag = readVarint(s, pos);
     if (!tag) {
       break;
     }
-    pos = tag[1];
-
-    const fieldNumber = Math.floor(tag[0] / 8);
-    const wireType = tag[0] % 8;
-    let value: Buffer | null = null;
-
+    pos = tag.p;
+    const fieldNum = Math.floor(tag.v / 8);
+    const wireType = tag.v % 8;
     if (wireType === 0) {
-      const varint = readVarint(data, pos);
-      if (!varint) {
+      const val = readVarint(s, pos);
+      if (!val) {
         break;
       }
-      pos = varint[1];
-      const existing = varints.get(fieldNumber) ?? [];
-      existing.push(varint[0]);
-      varints.set(fieldNumber, existing);
-      value = Buffer.from(String(varint[0]));
+      fields[fieldNum] = { type: 0, value: val.v };
+      pos = val.p;
     } else if (wireType === 1) {
-      const end = pos + 8;
-      if (end > data.length) {
+      if (pos + 8 > s.length) {
         break;
       }
-      value = data.subarray(pos, end);
-      pos = end;
+      pos += 8;
     } else if (wireType === 2) {
-      const length = readVarint(data, pos);
-      if (!length) {
+      const len = readVarint(s, pos);
+      if (!len) {
         break;
       }
-      pos = length[1];
-      const end = pos + length[0];
-      if (end > data.length) {
+      pos = len.p;
+      if (pos + len.v > s.length) {
         break;
       }
-      value = data.subarray(pos, end);
-      pos = end;
+      fields[fieldNum] = { type: 2, data: s.substring(pos, pos + len.v) };
+      pos += len.v;
     } else if (wireType === 5) {
-      const end = pos + 4;
-      if (end > data.length) {
+      if (pos + 4 > s.length) {
         break;
       }
-      value = data.subarray(pos, end);
-      pos = end;
+      pos += 4;
     } else {
       break;
     }
-
-    const existing = fields.get(fieldNumber) ?? [];
-    existing.push(value);
-    fields.set(fieldNumber, existing);
   }
-
-  return {
-    get(field: number) {
-      return fields.get(field) ?? [];
-    },
-    getVarint(field: number) {
-      return varints.get(field)?.[0] ?? null;
-    },
-  };
+  return fields;
 }
 
-function unwrapOAuthSentinel(base64Text: string): Buffer | null {
+// ---------------------------------------------------------------------------
+// SQLite credential reading — Antigravity wraps OAuth state in a
+// double-base64 envelope:
+//   b64(outer.f1 = wrapper{ f1=sentinel, f2=payload{ f1=b64(inner proto) } }).
+// The inner base64 layer is the unusual part — it's a UTF-8 string field,
+// not raw bytes.
+// ---------------------------------------------------------------------------
+
+function unwrapOAuthSentinel(base64Text: string): string | null {
   const trimmed = base64Text.trim();
   if (!trimmed) {
     return null;
   }
 
   try {
-    const outer = readProtoFields(Buffer.from(trimmed, 'base64'));
-    const wrapperBytes = outer.get(1)[0];
-    if (!wrapperBytes) {
+    const outer = readFields(Buffer.from(trimmed, 'base64').toString('binary'));
+    if (!outer[1] || outer[1].type !== 2) {
       return null;
     }
 
-    const wrapper = readProtoFields(wrapperBytes);
-    const sentinel = wrapper.get(1)[0]?.toString('utf8') ?? null;
-    const payload = wrapper.get(2)[0];
+    const wrapper = readFields(outer[1].data!);
+    const sentinel = wrapper[1]?.type === 2 ? wrapper[1].data : null;
+    const payload = wrapper[2]?.type === 2 ? wrapper[2].data : null;
     if (sentinel !== OAUTH_TOKEN_SENTINEL || !payload) {
+      // Support the newer sentinel name as a fallback.
+      if (sentinel !== 'authStateWithContextSentinelKey' || !payload) {
+        return null;
+      }
+    }
+
+    const payloadFields = readFields(payload);
+    if (!payloadFields[1] || payloadFields[1].type !== 2) {
       return null;
     }
 
-    const payloadFields = readProtoFields(payload);
-    const innerText = payloadFields.get(1)[0]?.toString('utf8').trim();
-    return innerText ? Buffer.from(innerText, 'base64') : null;
+    const innerText = payloadFields[1].data!.trim();
+    if (!innerText) {
+      return null;
+    }
+    return Buffer.from(innerText, 'base64').toString('binary');
   } catch {
     return null;
   }
@@ -186,18 +180,30 @@ function loadOAuthTokens(dbPath: string): OAuthTokens | null {
     return null;
   }
 
-  const fields = readProtoFields(inner);
-  const accessToken = fields.get(1)[0]?.toString('utf8') || null;
-  const refreshToken = fields.get(3)[0]?.toString('utf8') || null;
+  const fields = readFields(inner);
+  const accessToken = fields[1]?.type === 2 ? fields[1].data! : null;
+  const refreshToken = fields[3]?.type === 2 ? fields[3].data! : null;
   let expirySeconds: number | null = null;
-
-  const expiryMessage = fields.get(4)[0];
-  if (expiryMessage) {
-    expirySeconds = readProtoFields(expiryMessage).getVarint(1);
+  if (fields[4]?.type === 2) {
+    const ts = readFields(fields[4].data!);
+    if (ts[1]?.type === 0) {
+      expirySeconds = ts[1].value!;
+    }
   }
 
   return accessToken || refreshToken ? { accessToken, refreshToken, expirySeconds } : null;
 }
+
+// ---------------------------------------------------------------------------
+// LS discovery — find Antigravity language server processes on Windows/Linux.
+//
+// Key insight: the Antigravity LS exposes TWO servers on separate ports:
+//   1. Extension server port (--extension_server_port) — NOT for gRPC calls
+//   2. LS gRPC port — a DIFFERENT port the same process is listening on
+//
+// GetUserStatus must be called on the LS gRPC port (not the extension server
+// port) using --csrf_token (not --extension_server_csrf_token).
+// ---------------------------------------------------------------------------
 
 function extractFlag(cmd: string, flag: string): string | null {
   const parts = cmd.split(/\s+/);
@@ -211,16 +217,6 @@ function extractFlag(cmd: string, flag: string): string | null {
     }
   }
   return null;
-}
-
-function parseLsArgs(text: string): { port: number; csrf: string } | null {
-  const port = extractFlag(text, '--extension_server_port');
-  const csrf = extractFlag(text, '--csrf_token');
-  if (!port || !csrf) {
-    return null;
-  }
-  const portNum = Number(port);
-  return Number.isInteger(portNum) && portNum > 0 && portNum < 65536 ? { port: portNum, csrf } : null;
 }
 
 function discoverLs(): LsDiscovery | null {
@@ -249,13 +245,23 @@ function discoverWindowsLs(): LsDiscovery | null {
       if (!cmd || typeof cmd !== 'string') {
         continue;
       }
-      const args = parseLsArgs(cmd);
-      if (!args) {
+
+      const csrf = extractFlag(cmd, '--csrf_token');
+      const extPortStr = extractFlag(cmd, '--extension_server_port');
+      if (!csrf || !extPortStr) {
+        continue;
+      }
+
+      const extensionPort = Number(extPortStr);
+      if (!Number.isInteger(extensionPort) || extensionPort <= 0 || extensionPort >= 65536) {
         continue;
       }
 
       const pid = item.ProcessId;
-      const ports = new Set<number>([args.port]);
+      const lsPorts: number[] = [];
+
+      // Discover all listening ports for this process.
+      // The LS gRPC endpoint is on a different port than the extension server port.
       if (pid != null) {
         try {
           const portScript = `& { $ports = @(Get-NetTCPConnection -OwningProcess ${pid} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort); if ($ports.Count -eq 0) { '[]' } else { $ports | ConvertTo-Json -Compress } }`;
@@ -266,16 +272,16 @@ function discoverWindowsLs(): LsDiscovery | null {
           }).trim();
           for (const parsed of parseJsonItems(portsRaw)) {
             const port = Number(parsed);
-            if (Number.isInteger(port) && port > 0 && port < 65536) {
-              ports.add(port);
+            if (Number.isInteger(port) && port > 0 && port < 65536 && port !== extensionPort) {
+              lsPorts.push(port);
             }
           }
         } catch {
-          // Keep the command-line port.
+          // If port discovery fails, fall back to the extension port.
         }
       }
 
-      return { ports: [...ports], csrf: args.csrf, extensionPort: args.port };
+      return { lsPorts, csrf, extensionPort };
     }
   } catch {
     return null;
@@ -296,10 +302,18 @@ function discoverUnixLs(): LsDiscovery | null {
       if (!line.includes('language_server') || !line.toLowerCase().includes('antigravity')) {
         continue;
       }
-      const args = parseLsArgs(line);
-      if (args) {
-        return { ports: [args.port], csrf: args.csrf, extensionPort: args.port };
+      const csrf = extractFlag(line, '--csrf_token');
+      const extPortStr = extractFlag(line, '--extension_server_port');
+      if (!csrf || !extPortStr) {
+        continue;
       }
+      const extensionPort = Number(extPortStr);
+      if (!Number.isInteger(extensionPort) || extensionPort <= 0 || extensionPort >= 65536) {
+        continue;
+      }
+      // On Linux/macOS, just try the extension port as fallback;
+      // lsPorts could be discovered via `lsof` but keep it simple for now.
+      return { lsPorts: [], csrf, extensionPort };
     }
   } catch {
     return null;
@@ -336,44 +350,59 @@ function parseJsonItems(raw: string): any[] {
   }
 }
 
-function requestLocalJson(url: string, headers: Record<string, string>, body: unknown, timeoutMs: number, acceptAnyStatus = false): Promise<any | true> {
+// ---------------------------------------------------------------------------
+// Local HTTP helpers for LS calls
+// ---------------------------------------------------------------------------
+
+function requestLocalJson(
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  timeoutMs: number,
+  acceptAnyStatus = false,
+): Promise<any | true> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const client = parsed.protocol === 'https:' ? https : http;
     const bodyText = JSON.stringify(body ?? {});
-    const req = client.request({
-      protocol: parsed.protocol,
-      hostname: parsed.hostname,
-      port: parsed.port,
-      path: parsed.pathname,
-      method: 'POST',
-      headers: {
-        ...headers,
-        'Content-Length': Buffer.byteLength(bodyText).toString(),
+    const req = client.request(
+      {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port,
+        path: parsed.pathname,
+        method: 'POST',
+        headers: {
+          ...headers,
+          'Content-Length': Buffer.byteLength(bodyText).toString(),
+        },
+        rejectUnauthorized: false,
+        timeout: timeoutMs,
       },
-      rejectUnauthorized: false,
-      timeout: timeoutMs,
-    }, (res) => {
-      let responseText = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => { responseText += chunk; });
-      res.on('end', () => {
-        if (acceptAnyStatus) {
-          resolve(true);
-          return;
-        }
-        const status = res.statusCode ?? 0;
-        if (status < 200 || status >= 300) {
-          reject(new Error(`LS returned HTTP ${status}`));
-          return;
-        }
-        try {
-          resolve(responseText ? JSON.parse(responseText) : {});
-        } catch {
-          reject(new Error('LS returned invalid JSON.'));
-        }
-      });
-    });
+      (res) => {
+        let responseText = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          responseText += chunk;
+        });
+        res.on('end', () => {
+          if (acceptAnyStatus) {
+            resolve(true);
+            return;
+          }
+          const status = res.statusCode ?? 0;
+          if (status < 200 || status >= 300) {
+            reject(new Error(`LS returned HTTP ${status}`));
+            return;
+          }
+          try {
+            resolve(responseText ? JSON.parse(responseText) : {});
+          } catch {
+            reject(new Error('LS returned invalid JSON.'));
+          }
+        });
+      },
+    );
     req.on('timeout', () => {
       req.destroy(new Error('LS request timed out.'));
     });
@@ -412,20 +441,35 @@ async function probePort(scheme: string, port: number, csrf: string): Promise<bo
   }
 }
 
-async function findWorkingPort(discovery: LsDiscovery): Promise<{ port: number; scheme: 'https' | 'http' } | null> {
-  for (const port of discovery.ports) {
-    if (await probePort('https', port, discovery.csrf)) {
-      return { port, scheme: 'https' };
-    }
-    if (await probePort('http', port, discovery.csrf)) {
-      return { port, scheme: 'http' };
+async function findWorkingPort(
+  discovery: LsDiscovery,
+): Promise<{ port: number; scheme: 'https' | 'http' } | null> {
+  // First try all discovered LS ports (these are NOT the extension server port).
+  for (const port of discovery.lsPorts) {
+    for (const scheme of ['http', 'https'] as const) {
+      if (await probePort(scheme, port, discovery.csrf)) {
+        return { port, scheme };
+      }
     }
   }
 
-  return discovery.extensionPort ? { port: discovery.extensionPort, scheme: 'http' } : null;
+  // Fall back to the extension server port itself.
+  for (const scheme of ['http', 'https'] as const) {
+    if (await probePort(scheme, discovery.extensionPort, discovery.csrf)) {
+      return { port: discovery.extensionPort, scheme };
+    }
+  }
+
+  return null;
 }
 
-async function callLs(port: number, scheme: 'https' | 'http', csrf: string, method: string, body: unknown): Promise<any | null> {
+async function callLs(
+  port: number,
+  scheme: 'https' | 'http',
+  csrf: string,
+  method: string,
+  body: unknown,
+): Promise<any | null> {
   try {
     return await requestLocalJson(
       `${scheme}://127.0.0.1:${port}/${LS_SERVICE}/${method}`,
@@ -441,6 +485,10 @@ async function callLs(port: number, scheme: 'https' | 'http', csrf: string, meth
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// LS probe — try GetUserStatus then GetCommandModelConfigs
+// ---------------------------------------------------------------------------
 
 async function probeLs(): Promise<{ plan?: string | null; lines: MetricLine[] } | null> {
   const discovery = discoverLs();
@@ -460,10 +508,14 @@ async function probeLs(): Promise<{ plan?: string | null; lines: MetricLine[] } 
     locale: 'en',
   };
 
-  let data = await callLs(found.port, found.scheme, discovery.csrf, 'GetUserStatus', { metadata });
+  let data = await callLs(found.port, found.scheme, discovery.csrf, 'GetUserStatus', {
+    metadata,
+  });
   const hasUserStatus = Boolean(data?.userStatus);
   if (!hasUserStatus) {
-    data = await callLs(found.port, found.scheme, discovery.csrf, 'GetCommandModelConfigs', { metadata });
+    data = await callLs(found.port, found.scheme, discovery.csrf, 'GetCommandModelConfigs', {
+      metadata,
+    });
   }
 
   const configs = hasUserStatus
@@ -473,12 +525,20 @@ async function probeLs(): Promise<{ plan?: string | null; lines: MetricLine[] } 
     return null;
   }
 
-  const lines = buildModelLines(configs.map((config: any) => ({
-    label: typeof config?.label === 'string' ? config.label : '',
-    remainingFraction: Number(config?.quotaInfo?.remainingFraction),
-    resetTime: typeof config?.quotaInfo?.resetTime === 'string' ? config.quotaInfo.resetTime : null,
-    modelId: typeof config?.modelOrAlias?.model === 'string' ? config.modelOrAlias.model : null,
-  })).filter((config: ModelConfig) => config.label && !MODEL_BLACKLIST.has(config.modelId || '')));
+  const lines = buildModelLines(
+    configs
+      .map((config: any) => ({
+        label: typeof config?.label === 'string' ? config.label : '',
+        remainingFraction: Number(config?.quotaInfo?.remainingFraction),
+        resetTime:
+          typeof config?.quotaInfo?.resetTime === 'string' ? config.quotaInfo.resetTime : null,
+        modelId:
+          typeof config?.modelOrAlias?.model === 'string' ? config.modelOrAlias.model : null,
+      }))
+      .filter(
+        (config: ModelConfig) => config.label && !MODEL_BLACKLIST.has(config.modelId || ''),
+      ),
+  );
 
   if (lines.length === 0) {
     return null;
@@ -488,15 +548,20 @@ async function probeLs(): Promise<{ plan?: string | null; lines: MetricLine[] } 
   if (hasUserStatus) {
     const userTierName = data?.userStatus?.userTier?.name;
     const planName = data?.userStatus?.planStatus?.planInfo?.planName;
-    plan = typeof userTierName === 'string' && userTierName.trim()
-      ? userTierName.trim()
-      : typeof planName === 'string' && planName.trim()
-        ? planName.trim()
-        : null;
+    plan =
+      typeof userTierName === 'string' && userTierName.trim()
+        ? userTierName.trim()
+        : typeof planName === 'string' && planName.trim()
+          ? planName.trim()
+          : null;
   }
 
   return { plan, lines };
 }
+
+// ---------------------------------------------------------------------------
+// Model line helpers
+// ---------------------------------------------------------------------------
 
 function normalizeLabel(label: string): string {
   return label.replace(/\s*\([^)]*\)\s*$/, '').trim();
@@ -565,6 +630,10 @@ function buildModelLines(configs: ModelConfig[]): MetricLine[] {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Cloud Code API (token-based fallback when LS is not running)
+// ---------------------------------------------------------------------------
+
 async function refreshAccessToken(refreshToken: string): Promise<string | null> {
   if (!refreshToken) {
     return null;
@@ -595,7 +664,7 @@ async function refreshAccessToken(refreshToken: string): Promise<string | null> 
       return null;
     }
 
-    const data = await resp.json() as { access_token?: string; expires_in?: number };
+    const data = (await resp.json()) as { access_token?: string; expires_in?: number };
     if (!data.access_token) {
       return null;
     }
@@ -668,12 +737,17 @@ function parseCloudCodeModels(data: any): ModelConfig[] {
     configs.push({
       label: displayName,
       remainingFraction: Number(model?.quotaInfo?.remainingFraction),
-      resetTime: typeof model?.quotaInfo?.resetTime === 'string' ? model.quotaInfo.resetTime : null,
+      resetTime:
+        typeof model?.quotaInfo?.resetTime === 'string' ? model.quotaInfo.resetTime : null,
       modelId,
     });
   }
   return configs;
 }
+
+// ---------------------------------------------------------------------------
+// Main probe entry point
+// ---------------------------------------------------------------------------
 
 export async function probeAntigravity(): Promise<{ plan?: string | null; lines: MetricLine[] }> {
   const config = vscode.workspace.getConfiguration('usagedock');
@@ -684,11 +758,13 @@ export async function probeAntigravity(): Promise<{ plan?: string | null; lines:
   const dbPath = getAntigravityDbPath();
   const dbTokens = dbPath && fs.existsSync(dbPath) ? loadOAuthTokens(dbPath) : null;
 
+  // --- Strategy 1: LS probe (returns model data directly, no token needed) ---
   const lsResult = await probeLs();
   if (lsResult) {
     return lsResult;
   }
 
+  // --- Strategy 2: Cloud Code API with tokens from the DB ---
   if (!dbPath || !fs.existsSync(dbPath)) {
     throw new Error('Antigravity not installed or not signed in.');
   }
