@@ -101,6 +101,16 @@
           "default": true,
           "description": "Show UsageDock status in the VS Code status bar."
         },
+        "usagedock.ollama.url": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Ollama server base URL. Use http://localhost:11434 for local Ollama, or set a remote/cloud URL."
+        },
+        "usagedock.ollama.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Optional API key for authenticated cloud-hosted Ollama servers. Sent as `Authorization: Bearer <key>`. Leave empty for local Ollama (no auth needed)."
+        },
         "usagedock.antigravity.enabled": {
           "type": "boolean",
           "default": true,

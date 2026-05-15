@@ -2,7 +2,7 @@
 
 Keep your AI coding usage visible without leaving the editor.
 
-UsageDock adds a compact local usage monitor for Cursor, Claude, GitHub Copilot, Codex, Windsurf, and Antigravity directly inside VS Code. It reads supported local auth state and usage signals where allowed, then presents them in a focused sidebar view and status bar summary.
+UsageDock adds a compact local usage monitor for Cursor, Claude, GitHub Copilot, Codex, Windsurf, Antigravity, and Ollama directly inside VS Code. It reads supported local auth state and usage signals where allowed, then presents them in a focused sidebar view and status bar summary.
 
 No UsageDock account. No hosted dashboard. No provider credentials sent to a UsageDock backend.
 
@@ -21,10 +21,11 @@ No UsageDock account. No hosted dashboard. No provider credentials sent to a Usa
 |---|---|---|
 | Cursor | Local Cursor auth state and usage API | Cursor installed and signed in |
 | Claude | Local Claude credentials | Claude CLI/app authenticated locally |
-| GitHub Copilot | GitHub CLI auth token | `gh auth login` completed |
+| GitHub Copilot | GitHub auth session in VS Code or GitHub CLI token | Copilot signed in to VS Code, or `gh auth login` completed |
 | Codex | Local Codex auth state | Codex authenticated locally |
 | Windsurf | Local Windsurf state and language server | Windsurf running and signed in |
 | Antigravity | Local Antigravity auth state and model quota metadata | Antigravity installed and signed in |
+| Ollama | Running model list, VRAM usage, and available model count | Ollama running locally or reachable at the configured URL |
 
 Unavailable providers stay visible as connection states so you know what needs attention.
 
@@ -65,7 +66,9 @@ UsageDock intentionally does not refresh on open by default. You can change that
   "usagedock.autoRefresh.intervalMinutes": 15,
   "usagedock.refreshOnOpen": false,
   "usagedock.statusBar.enabled": true,
-  "usagedock.antigravity.enabled": true
+  "usagedock.antigravity.enabled": true,
+  "usagedock.ollama.url": "http://localhost:11434",
+  "usagedock.ollama.apiKey": ""
 }
 ```
 
@@ -76,6 +79,8 @@ UsageDock intentionally does not refresh on open by default. You can change that
 | `usagedock.refreshOnOpen` | `false` | Refresh when the UsageDock sidebar view opens. |
 | `usagedock.statusBar.enabled` | `true` | Show UsageDock in the VS Code status bar. |
 | `usagedock.antigravity.enabled` | `true` | Show Antigravity model quota tracking. |
+| `usagedock.ollama.url` | `http://localhost:11434` | Ollama server URL. Use a remote URL for cloud-hosted Ollama. |
+| `usagedock.ollama.apiKey` | _(empty)_ | API key for authenticated cloud Ollama servers. Leave empty for local Ollama. |
 
 ## Commands
 
@@ -87,11 +92,32 @@ Use these from the Command Palette:
 
 ## Notes
 
-- GitHub Copilot usage requires the GitHub CLI to be installed and authenticated.
+- GitHub Copilot usage requires the GitHub CLI to be installed and authenticated, or a GitHub account signed in to VS Code with Copilot access.
 - Windsurf usage requires Windsurf to be running so its local language server can be reached.
 - Antigravity quota checks fetch model quota metadata only; they do not send prompts or run generations, so checking quota should not consume quota.
 - Antigravity OAuth refresh is optional and uses `USAGEDOCK_ANTIGRAVITY_GOOGLE_CLIENT_ID` and `USAGEDOCK_ANTIGRAVITY_GOOGLE_CLIENT_SECRET` when present; these values are not bundled in the extension.
 - Remote environments such as SSH, containers, or Codespaces may not have access to the same local provider files as your desktop session.
+
+### Ollama
+
+UsageDock connects to your Ollama server and shows which models are currently loaded, their VRAM usage, and how many models are available locally. No tokens are consumed — UsageDock only calls the read-only status endpoints (`/api/version`, `/api/ps`, `/api/tags`).
+
+**Local Ollama (default):** Just start Ollama. No configuration needed.
+
+**Remote or cloud-hosted Ollama:** Set the server URL in VS Code settings:
+
+```json
+"usagedock.ollama.url": "https://your-cloud-ollama.example.com"
+```
+
+**Authenticated cloud Ollama** (e.g. Groq, Together AI, or any self-hosted instance with an API key):
+
+```json
+"usagedock.ollama.url": "https://your-cloud-ollama.example.com",
+"usagedock.ollama.apiKey": "your-api-key-here"
+```
+
+The key is sent as `Authorization: Bearer <key>` on every request, which is the standard scheme for Ollama-compatible cloud APIs.
 
 ## Development
 

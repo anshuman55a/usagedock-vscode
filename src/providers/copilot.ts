@@ -149,62 +149,158 @@ async function fetchUsage(token: string): Promise<any> {
   return resp.json();
 }
 
+// ── Response parsers ──────────────────────────────────────────────
+
+/**
+ * NEW format (2025+): `quotas` object with `used` / `total` counts
+ * and optional `reset_date`.
+ *
+ * ```json
+ * {
+ *   "quotas": {
+ *     "premium_interactions": { "unlimited": false, "used": 150, "total": 300, "reset_date": "..." },
+ *     "chat": { "unlimited": true },
+ *     "completions": { "unlimited": true }
+ *   }
+ * }
+ * ```
+ */
+function parseQuotasObject(data: any, lines: MetricLine[]): void {
+  const quotas = data.quotas;
+  if (!quotas || typeof quotas !== 'object') {
+    return;
+  }
+
+  for (const [key, raw] of Object.entries(quotas)) {
+    const q = raw as any;
+    if (!q || typeof q !== 'object') {
+      continue;
+    }
+
+    // Skip unlimited categories — nothing useful to show
+    if (q.unlimited === true) {
+      continue;
+    }
+
+    const used = typeof q.used === 'number' ? q.used : null;
+    const total = typeof q.total === 'number' ? q.total : null;
+
+    if (used != null && total != null && total > 0) {
+      const pct = Math.min(Math.max(Math.round((used / total) * 100), 0), 100);
+      const label = key
+        .replace(/_/g, ' ')
+        .replace(/\b\w/g, (c) => c.toUpperCase()); // "premium_interactions" → "Premium Interactions"
+
+      lines.push({
+        type: 'progress',
+        label,
+        used: pct,
+        limit: 100,
+        format: { kind: 'percent' },
+        resetsAt: q.reset_date ?? data.quota_reset_date ?? null,
+      });
+    }
+  }
+}
+
+/**
+ * LEGACY format: `quota_snapshots` with `percent_remaining` per category.
+ *
+ * ```json
+ * {
+ *   "quota_snapshots": {
+ *     "premium_interactions": { "percent_remaining": 85 },
+ *     "chat": { "percent_remaining": 92 }
+ *   }
+ * }
+ * ```
+ */
+function parseQuotaSnapshots(data: any, lines: MetricLine[]): void {
+  const snapshots = data.quota_snapshots;
+  if (!snapshots || typeof snapshots !== 'object') {
+    return;
+  }
+
+  const premium = snapshots.premium_interactions;
+  if (premium?.percent_remaining != null) {
+    const used = Math.min(Math.max(100 - premium.percent_remaining, 0), 100);
+    lines.push({
+      type: 'progress',
+      label: 'Premium',
+      used,
+      limit: 100,
+      format: { kind: 'percent' },
+      resetsAt: data.quota_reset_date ?? null,
+    });
+  }
+
+  const chat = snapshots.chat;
+  if (chat?.percent_remaining != null) {
+    const used = Math.min(Math.max(100 - chat.percent_remaining, 0), 100);
+    lines.push({
+      type: 'progress',
+      label: 'Chat',
+      used,
+      limit: 100,
+      format: { kind: 'percent' },
+      resetsAt: null,
+    });
+  }
+}
+
+/**
+ * FREE-TIER format: `limited_user_quotas` + `monthly_quotas` with raw counts.
+ */
+function parseFreeQuotas(data: any, lines: MetricLine[]): void {
+  if (!data.limited_user_quotas || !data.monthly_quotas) {
+    return;
+  }
+
+  const resetDate = data.limited_user_reset_date ?? null;
+  const remaining = data.limited_user_quotas.chat;
+  const total = data.monthly_quotas.chat;
+
+  if (remaining != null && total != null && total > 0) {
+    const used = total - remaining;
+    const pct = Math.min(Math.max(Math.round((used / total) * 100), 0), 100);
+    lines.push({
+      type: 'progress',
+      label: 'Chat',
+      used: pct,
+      limit: 100,
+      format: { kind: 'percent' },
+      resetsAt: resetDate,
+    });
+  }
+}
+
 // ── Probe ─────────────────────────────────────────────────────────
 
 export async function probeCopilot(): Promise<{ plan?: string | null; lines: MetricLine[] }> {
   const token = await loadToken();
   const data = await fetchUsage(token);
 
+  // Log the raw response so we can diagnose issues in the Output panel
+  console.log('[UsageDock] Copilot API response:', JSON.stringify(data, null, 2));
+
   const lines: MetricLine[] = [];
-  const plan = data.copilot_plan ? capitalize(data.copilot_plan) : undefined;
 
-  // Paid tier: quota_snapshots
-  if (data.quota_snapshots) {
-    const premium = data.quota_snapshots.premium_interactions;
-    if (premium?.percent_remaining != null) {
-      const used = Math.min(Math.max(100 - premium.percent_remaining, 0), 100);
-      lines.push({
-        type: 'progress',
-        label: 'Premium',
-        used,
-        limit: 100,
-        format: { kind: 'percent' },
-        resetsAt: data.quota_reset_date ?? null,
-      });
-    }
+  // Detect plan name from whichever field is present
+  const plan = data.copilot_plan
+    ? capitalize(data.copilot_plan)
+    : data.plan_type
+      ? capitalize(data.plan_type)
+      : undefined;
 
-    const chat = data.quota_snapshots.chat;
-    if (chat?.percent_remaining != null) {
-      const used = Math.min(Math.max(100 - chat.percent_remaining, 0), 100);
-      lines.push({
-        type: 'progress',
-        label: 'Chat',
-        used,
-        limit: 100,
-        format: { kind: 'percent' },
-        resetsAt: null,
-      });
-    }
+  // Try parsers in priority order; stop as soon as one produces lines
+  parseQuotasObject(data, lines);
+
+  if (lines.length === 0) {
+    parseQuotaSnapshots(data, lines);
   }
 
-  // Free tier: limited_user_quotas
-  if (data.limited_user_quotas && data.monthly_quotas) {
-    const resetDate = data.limited_user_reset_date ?? null;
-
-    const remaining = data.limited_user_quotas.chat;
-    const total = data.monthly_quotas.chat;
-    if (remaining != null && total != null && total > 0) {
-      const used = total - remaining;
-      const pct = Math.min(Math.max(Math.round((used / total) * 100), 0), 100);
-      lines.push({
-        type: 'progress',
-        label: 'Chat',
-        used: pct,
-        limit: 100,
-        format: { kind: 'percent' },
-        resetsAt: resetDate,
-      });
-    }
+  if (lines.length === 0) {
+    parseFreeQuotas(data, lines);
   }
 
   if (lines.length === 0) {

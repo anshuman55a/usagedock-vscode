@@ -5,6 +5,7 @@ import { probeCopilot } from './copilot';
 import { probeCodex } from './codex';
 import { probeWindsurf } from './windsurf';
 import { probeAntigravity } from './antigravity';
+import { probeOllama } from './ollama';
 
 const PROVIDERS: ProviderMeta[] = [
   { id: 'cursor', name: 'Cursor', icon: 'cursor', brandColor: '#000000' },
@@ -13,6 +14,7 @@ const PROVIDERS: ProviderMeta[] = [
   { id: 'codex', name: 'Codex', icon: 'codex', brandColor: '#000000' },
   { id: 'windsurf', name: 'Windsurf', icon: 'windsurf', brandColor: '#00B4D8' },
   { id: 'antigravity', name: 'Antigravity', icon: 'antigravity', brandColor: '#6D5DF6' },
+  { id: 'ollama', name: 'Ollama', icon: 'ollama', brandColor: '#FFFFFF' },
 ];
 
 const PROBE_MAP: Record<string, () => Promise<{ plan?: string | null; lines: import('./types').MetricLine[] }>> = {
@@ -22,6 +24,7 @@ const PROBE_MAP: Record<string, () => Promise<{ plan?: string | null; lines: imp
   codex: probeCodex,
   windsurf: probeWindsurf,
   antigravity: probeAntigravity,
+  ollama: probeOllama,
 };
 
 export function listProviders(): ProviderMeta[] {

@@ -39,6 +39,25 @@ export const AntigravityIcon = () => (
   </svg>
 );
 
+export const OllamaIcon = () => (
+  <svg style={iconStyle} viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+    {/* Llama head outline */}
+    <circle cx="35" cy="38" r="8" fill="currentColor" />
+    <circle cx="65" cy="38" r="8" fill="currentColor" />
+    <ellipse cx="50" cy="58" rx="22" ry="18" fill="currentColor" />
+    {/* Eyes */}
+    <circle cx="35" cy="38" r="3.5" fill="var(--vscode-editor-background, #1e1e1e)" />
+    <circle cx="65" cy="38" r="3.5" fill="var(--vscode-editor-background, #1e1e1e)" />
+    {/* Snout */}
+    <ellipse cx="50" cy="66" rx="9" ry="6" fill="var(--vscode-editor-background, #1e1e1e)" opacity="0.4" />
+    {/* Ears */}
+    <path d="M24 32 Q20 18 28 14 Q32 26 30 32Z" fill="currentColor" />
+    <path d="M76 32 Q80 18 72 14 Q68 26 70 32Z" fill="currentColor" />
+    {/* Neck/body */}
+    <rect x="38" y="72" width="24" height="14" rx="4" fill="currentColor" />
+  </svg>
+);
+
 export const PROVIDER_ICONS: Record<string, React.FC> = {
-  cursor: CursorIcon, claude: ClaudeIcon, copilot: CopilotIcon, codex: CodexIcon, windsurf: WindsurfIcon, antigravity: AntigravityIcon,
+  cursor: CursorIcon, claude: ClaudeIcon, copilot: CopilotIcon, codex: CodexIcon, windsurf: WindsurfIcon, antigravity: AntigravityIcon, ollama: OllamaIcon,
 };

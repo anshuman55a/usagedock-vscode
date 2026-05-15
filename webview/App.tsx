@@ -13,7 +13,7 @@ type MetricLine = ProgressLine | TextLine | BadgeLine;
 interface ProviderResult { id: string; name: string; icon: string; brandColor: string; plan?: string | null; lines: MetricLine[]; error?: string | null; }
 
 const PROVIDER_STYLES: Record<string, { bg: string }> = {
-  cursor: { bg: '#000000' }, claude: { bg: '#D97757' }, copilot: { bg: '#000000' }, codex: { bg: '#000000' }, windsurf: { bg: '#00B4D8' }, antigravity: { bg: '#6D5DF6' },
+  cursor: { bg: '#000000' }, claude: { bg: '#D97757' }, copilot: { bg: '#000000' }, codex: { bg: '#000000' }, windsurf: { bg: '#00B4D8' }, antigravity: { bg: '#6D5DF6' }, ollama: { bg: '#1a1a1a' },
 };
 
 function formatValue(used: number, limit: number, format: MetricFormat): string {
