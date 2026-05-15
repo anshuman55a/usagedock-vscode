@@ -8,6 +8,8 @@
 - Removed the earlier cached `antigravityAuthStatus` and manual quota fallback paths from the Antigravity provider.
 - Made Antigravity prefer the local cached Model Quota data before language-server or network fallbacks.
 - Bumped the VSIX version so VS Code installs a fresh extension copy with the Antigravity fix.
+- Fixed Copilot Free quota parsing so `limited_user_quotas` is treated as remaining quota and chat usage renders as the used percentage.
+- Added Inline Suggestions as a separate Copilot Free quota line and removed raw Copilot API response logging.
 
 ## 0.1.2
 

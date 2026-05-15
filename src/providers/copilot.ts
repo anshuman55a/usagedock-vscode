@@ -257,15 +257,23 @@ function parseFreeQuotas(data: any, lines: MetricLine[]): void {
   }
 
   const resetDate = data.limited_user_reset_date ?? null;
-  const remaining = data.limited_user_quotas.chat;
-  const total = data.monthly_quotas.chat;
+  const quotaLabels: Record<string, string> = {
+    chat: 'Chat messages',
+    completions: 'Inline Suggestions',
+  };
 
-  if (remaining != null && total != null && total > 0) {
-    const used = total - remaining;
-    const pct = Math.min(Math.max(Math.round((used / total) * 100), 0), 100);
+  for (const key of Object.keys(quotaLabels)) {
+    const remaining = Number(data.limited_user_quotas[key]);
+    const total = Number(data.monthly_quotas[key]);
+    if (!Number.isFinite(remaining) || !Number.isFinite(total) || total <= 0) {
+      continue;
+    }
+
+    const usedCount = Math.max(total - remaining, 0);
+    const pct = Math.min(Math.max(Math.round((usedCount / total) * 100), 0), 100);
     lines.push({
       type: 'progress',
-      label: 'Chat',
+      label: quotaLabels[key],
       used: pct,
       limit: 100,
       format: { kind: 'percent' },
@@ -280,9 +288,6 @@ export async function probeCopilot(): Promise<{ plan?: string | null; lines: Met
   const token = await loadToken();
   const data = await fetchUsage(token);
 
-  // Log the raw response so we can diagnose issues in the Output panel
-  console.log('[UsageDock] Copilot API response:', JSON.stringify(data, null, 2));
-
   const lines: MetricLine[] = [];
 
   // Detect plan name from whichever field is present
@@ -292,15 +297,17 @@ export async function probeCopilot(): Promise<{ plan?: string | null; lines: Met
       ? capitalize(data.plan_type)
       : undefined;
 
-  // Try parsers in priority order; stop as soon as one produces lines
-  parseQuotasObject(data, lines);
+  // Try parsers in specificity order.
+  // Free-tier goes FIRST because it carries exact remaining/total counts
+  // and its presence (`limited_user_quotas`) is a strong signal.
+  parseFreeQuotas(data, lines);
 
   if (lines.length === 0) {
-    parseQuotaSnapshots(data, lines);
+    parseQuotasObject(data, lines);
   }
 
   if (lines.length === 0) {
-    parseFreeQuotas(data, lines);
+    parseQuotaSnapshots(data, lines);
   }
 
   if (lines.length === 0) {
