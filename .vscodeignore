@@ -13,16 +13,7 @@ debug.log
 debug_db.js
 
 # The extension host and webview are bundled into dist.
+# sql.js is pure WASM (no native bindings) and is bundled by esbuild.
+# The .wasm file must ship alongside the bundle.
 node_modules/**
-
-# Runtime SQLite native dependency kept because better-sqlite3 is externalized.
-!node_modules/better-sqlite3/**
-!node_modules/bindings/**
-!node_modules/file-uri-to-path/**
-
-# Drop build/source-only files from the native dependency.
-node_modules/better-sqlite3/src/**
-node_modules/better-sqlite3/deps/**
-node_modules/better-sqlite3/binding.gyp
-node_modules/better-sqlite3/README.md
-node_modules/bindings/README.md
+!node_modules/sql.js/dist/sql-wasm.wasm

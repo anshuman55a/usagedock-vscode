@@ -169,8 +169,8 @@ function unwrapOAuthSentinel(base64Text: string): string | null {
   }
 }
 
-function loadOAuthTokens(dbPath: string): OAuthTokens | null {
-  const raw = readDbValue(dbPath, OAUTH_TOKEN_KEY);
+async function loadOAuthTokens(dbPath: string): Promise<OAuthTokens | null> {
+  const raw = await readDbValue(dbPath, OAUTH_TOKEN_KEY);
   if (!raw) {
     return null;
   }
@@ -756,7 +756,7 @@ export async function probeAntigravity(): Promise<{ plan?: string | null; lines:
   }
 
   const dbPath = getAntigravityDbPath();
-  const dbTokens = dbPath && fs.existsSync(dbPath) ? loadOAuthTokens(dbPath) : null;
+  const dbTokens = dbPath && fs.existsSync(dbPath) ? await loadOAuthTokens(dbPath) : null;
 
   // --- Strategy 1: LS probe (returns model data directly, no token needed) ---
   const lsResult = await probeLs();

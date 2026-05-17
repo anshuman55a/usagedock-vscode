@@ -8,7 +8,7 @@ const options = {
   entryPoints: [path.join(rootDir, 'src', 'extension.ts')],
   bundle: true,
   outfile: path.join(rootDir, 'dist', 'extension.js'),
-  external: ['vscode', 'better-sqlite3'],
+  external: ['vscode'],
   format: 'cjs',
   platform: 'node',
   target: 'node18',

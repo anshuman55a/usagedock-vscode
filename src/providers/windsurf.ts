@@ -4,8 +4,8 @@ import type { MetricLine } from './types';
 import { getWindsurfDbPaths } from '../util/platform';
 import { readDbValue } from '../util/sqlite';
 
-function loadApiKey(dbPath: string): string | null {
-  const raw = readDbValue(dbPath, 'windsurfAuthStatus');
+async function loadApiKey(dbPath: string): Promise<string | null> {
+  const raw = await readDbValue(dbPath, 'windsurfAuthStatus');
   if (!raw) { return null; }
   try {
     const auth = JSON.parse(raw);
@@ -146,7 +146,7 @@ export async function probeWindsurf(): Promise<{ plan?: string | null; lines: Me
 
   for (let i = 0; i < dbPaths.length; i++) {
     if (fs.existsSync(dbPaths[i])) {
-      const key = loadApiKey(dbPaths[i]);
+      const key = await loadApiKey(dbPaths[i]);
       if (key) { apiKey = key; variantName = i === 0 ? 'windsurf' : 'windsurf-next'; break; }
     }
   }

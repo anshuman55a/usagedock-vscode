@@ -74,8 +74,8 @@ export async function probeCursor(): Promise<{ plan?: string | null; lines: Metr
     throw new Error('Cursor not installed or not signed in.');
   }
 
-  const accessToken = readDbValue(dbPath, 'cursorAuth/accessToken');
-  const refreshTok = readDbValue(dbPath, 'cursorAuth/refreshToken');
+  const accessToken = await readDbValue(dbPath, 'cursorAuth/accessToken');
+  const refreshTok = await readDbValue(dbPath, 'cursorAuth/refreshToken');
 
   let token: string;
   if (accessToken) {
