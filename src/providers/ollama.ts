@@ -31,17 +31,24 @@ function formatBytes(bytes: number): string {
   return `${Math.round(bytes / 1024)} KB`;
 }
 
-async function ollamaFetch(url: string): Promise<any> {
-  const apiKey = getOllamaApiKey();
+function buildHeaders(): Record<string, string> {
   const headers: Record<string, string> = { Accept: 'application/json' };
+  const apiKey = getOllamaApiKey();
   if (apiKey) {
     headers['Authorization'] = `Bearer ${apiKey}`;
   }
+  return headers;
+}
 
+/**
+ * Fetch JSON from an Ollama endpoint, returning both the body and
+ * the raw Response so we can inspect rate-limit headers.
+ */
+async function ollamaFetchRaw(url: string): Promise<{ body: any; resp: Response }> {
   const resp = await fetch(url, {
     method: 'GET',
-    headers,
-    signal: AbortSignal.timeout(5_000), // 5 s — may be remote
+    headers: buildHeaders(),
+    signal: AbortSignal.timeout(5_000),
   });
   if (resp.status === 401 || resp.status === 403) {
     throw new Error(`Ollama auth failed (HTTP ${resp.status}). Check usagedock.ollama.apiKey.`);
@@ -49,7 +56,129 @@ async function ollamaFetch(url: string): Promise<any> {
   if (!resp.ok) {
     throw new Error(`Ollama request failed (HTTP ${resp.status})`);
   }
-  return resp.json();
+  const body = await resp.json();
+  return { body, resp };
+}
+
+// ── Rate-limit header parsing ─────────────────────────────────────
+//
+// Cloud Ollama-compatible services (Groq, Together AI, OpenRouter, etc.)
+// attach standard rate-limit headers to every response:
+//
+//   x-ratelimit-limit-requests      / x-ratelimit-remaining-requests      / x-ratelimit-reset-requests
+//   x-ratelimit-limit-tokens        / x-ratelimit-remaining-tokens        / x-ratelimit-reset-tokens
+//
+// Some use shortened forms without the "x-" prefix or the "-requests"/"-tokens" suffix.
+
+interface RateLimitBucket {
+  label: string;
+  limit: number;
+  remaining: number;
+  resetAt: string | null;  // ISO timestamp or duration string
+}
+
+function parseRateLimitHeaders(resp: Response): RateLimitBucket[] {
+  const buckets: RateLimitBucket[] = [];
+  const h = (name: string) => resp.headers.get(name);
+
+  // Helper: try multiple header name variants
+  const tryParseInt = (...names: string[]): number | null => {
+    for (const n of names) {
+      const v = h(n);
+      if (v != null) {
+        const num = parseInt(v, 10);
+        if (!Number.isNaN(num)) {
+          return num;
+        }
+      }
+    }
+    return null;
+  };
+
+  const tryGetString = (...names: string[]): string | null => {
+    for (const n of names) {
+      const v = h(n);
+      if (v != null && v.trim()) {
+        return v.trim();
+      }
+    }
+    return null;
+  };
+
+  // Request limits
+  const reqLimit = tryParseInt(
+    'x-ratelimit-limit-requests',
+    'ratelimit-limit',
+    'x-ratelimit-limit',
+  );
+  const reqRemaining = tryParseInt(
+    'x-ratelimit-remaining-requests',
+    'ratelimit-remaining',
+    'x-ratelimit-remaining',
+  );
+  if (reqLimit != null && reqRemaining != null && reqLimit > 0) {
+    const resetStr = tryGetString(
+      'x-ratelimit-reset-requests',
+      'ratelimit-reset',
+      'x-ratelimit-reset',
+    );
+    buckets.push({
+      label: 'Requests',
+      limit: reqLimit,
+      remaining: reqRemaining,
+      resetAt: resetStr,
+    });
+  }
+
+  // Token limits
+  const tokLimit = tryParseInt(
+    'x-ratelimit-limit-tokens',
+  );
+  const tokRemaining = tryParseInt(
+    'x-ratelimit-remaining-tokens',
+  );
+  if (tokLimit != null && tokRemaining != null && tokLimit > 0) {
+    const resetStr = tryGetString(
+      'x-ratelimit-reset-tokens',
+    );
+    buckets.push({
+      label: 'Tokens',
+      limit: tokLimit,
+      remaining: tokRemaining,
+      resetAt: resetStr,
+    });
+  }
+
+  return buckets;
+}
+
+/**
+ * Convert a rate-limit reset value to an ISO timestamp.
+ * It may already be an ISO date, a Unix timestamp, or a duration like "1m30s" / "2h".
+ */
+function resetToIso(reset: string): string | null {
+  // Already an ISO date?
+  if (/^\d{4}-\d{2}/.test(reset)) {
+    return reset;
+  }
+  // Unix timestamp (seconds)?
+  if (/^\d{8,}$/.test(reset)) {
+    return new Date(parseInt(reset, 10) * 1000).toISOString();
+  }
+  // Duration like "1m30.5s", "2h", "45s", "1d2h3m"
+  const durationRx = /(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/;
+  const m = reset.match(durationRx);
+  if (m && (m[1] || m[2] || m[3] || m[4])) {
+    const days = parseInt(m[1] || '0', 10);
+    const hours = parseInt(m[2] || '0', 10);
+    const mins = parseInt(m[3] || '0', 10);
+    const secs = parseFloat(m[4] || '0');
+    const ms = ((days * 24 + hours) * 60 + mins) * 60000 + secs * 1000;
+    if (ms > 0) {
+      return new Date(Date.now() + ms).toISOString();
+    }
+  }
+  return null;
 }
 
 // ── Probe ─────────────────────────────────────────────────────────
@@ -58,12 +187,13 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
   const base = getOllamaBaseUrl();
 
   // 1. Version — also serves as the liveness check.
-  //    If Ollama is not running this fetch will reject; the engine wraps it in a try/catch
-  //    and surfaces the card as unavailable.
   let version = '';
+  let rateLimits: RateLimitBucket[] = [];
   try {
-    const v = await ollamaFetch(`${base}/api/version`) as { version?: string };
-    version = v.version ?? '';
+    const { body, resp } = await ollamaFetchRaw(`${base}/api/version`);
+    version = (body as any).version ?? '';
+    // Capture rate-limit headers from this first response
+    rateLimits = parseRateLimitHeaders(resp);
   } catch {
     throw new Error(`Ollama not running at ${base}. Start Ollama and try again.`);
   }
@@ -71,29 +201,54 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
   // 2. Running models (`/api/ps`)
   let runningModels: any[] = [];
   try {
-    const ps = await ollamaFetch(`${base}/api/ps`) as { models?: any[] };
-    runningModels = ps.models ?? [];
+    const { body, resp } = await ollamaFetchRaw(`${base}/api/ps`);
+    runningModels = (body as any).models ?? [];
+    // If version response had no rate-limit headers, try from ps
+    if (rateLimits.length === 0) {
+      rateLimits = parseRateLimitHeaders(resp);
+    }
   } catch {
-    // Non-fatal — old Ollama versions may not have /api/ps; just show 0 loaded
+    // Non-fatal — old Ollama versions may not have /api/ps
   }
 
   // 3. Available models (`/api/tags`)
   let availableCount = 0;
   try {
-    const tags = await ollamaFetch(`${base}/api/tags`) as { models?: any[] };
-    availableCount = (tags.models ?? []).length;
+    const { body, resp } = await ollamaFetchRaw(`${base}/api/tags`);
+    availableCount = ((body as any).models ?? []).length;
+    // Try rate-limit headers from tags if still empty
+    if (rateLimits.length === 0) {
+      rateLimits = parseRateLimitHeaders(resp);
+    }
   } catch {
     // Non-fatal
   }
 
   // ── Build metric lines ─────────────────────────────────────────
   const lines: MetricLine[] = [];
+  const isCloud = rateLimits.length > 0;
 
   // Status badge
   const versionLabel = version ? `Running (v${version})` : 'Running';
   lines.push({ type: 'badge', label: 'Server', text: versionLabel, color: '#4ade80' });
 
-  // Model count summary
+  // ── Rate-limit usage bars (cloud services only) ────────────────
+  for (const bucket of rateLimits) {
+    const used = bucket.limit - bucket.remaining;
+    const pct = Math.min(Math.max(Math.round((used / bucket.limit) * 100), 0), 100);
+    const resetIso = bucket.resetAt ? resetToIso(bucket.resetAt) : null;
+
+    lines.push({
+      type: 'progress',
+      label: bucket.label,
+      used: pct,
+      limit: 100,
+      format: { kind: 'percent' },
+      resetsAt: resetIso,
+    });
+  }
+
+  // ── Model count summary ────────────────────────────────────────
   const loadedCount = runningModels.length;
   const countText =
     availableCount > 0
@@ -111,7 +266,6 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
     const paramSize: string | null = m.details?.parameter_size ?? null;
     const quant: string | null = m.details?.quantization_level ?? null;
 
-    // Build detail string:  "4.9 GB VRAM · 7.2B · Q4_0"
     const parts: string[] = [];
     if (vram != null && vram > 0) {
       parts.push(`${formatBytes(vram)} VRAM`);
@@ -126,10 +280,16 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
     }
 
     const detail = parts.length > 0 ? parts.join(' · ') : '';
+    lines.push({ type: 'text', label: name, value: detail });
+  }
+
+  // If the server is local with no rate limits and no models, add a hint
+  if (!isCloud && loadedCount === 0 && availableCount === 0) {
     lines.push({
-      type: 'text',
-      label: name,
-      value: detail,
+      type: 'badge',
+      label: 'Hint',
+      text: 'Local Ollama has no usage limits',
+      color: '#a3a3a3',
     });
   }
 
