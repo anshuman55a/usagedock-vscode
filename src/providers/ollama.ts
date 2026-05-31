@@ -1,5 +1,10 @@
+import * as fs from 'fs';
 import * as vscode from 'vscode';
 import type { MetricLine } from './types';
+import { getOllamaDbPath } from '../util/platform';
+import { readDbValue } from '../util/sqlite';
+import initSqlJs, { type Database } from 'sql.js';
+import * as path from 'path';
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -8,7 +13,7 @@ function getOllamaBaseUrl(): string {
     vscode.workspace
       .getConfiguration('usagedock')
       .get<string>('ollama.url', 'http://localhost:11434')
-      .replace(/\/$/, '') // strip trailing slash
+      .replace(/\/$/, '')
   );
 }
 
@@ -40,11 +45,7 @@ function buildHeaders(): Record<string, string> {
   return headers;
 }
 
-/**
- * Fetch JSON from an Ollama endpoint, returning both the body and
- * the raw Response so we can inspect rate-limit headers.
- */
-async function ollamaFetchRaw(url: string): Promise<{ body: any; resp: Response }> {
+async function ollamaGet(url: string): Promise<{ body: any; resp: Response }> {
   const resp = await fetch(url, {
     method: 'GET',
     headers: buildHeaders(),
@@ -56,32 +57,39 @@ async function ollamaFetchRaw(url: string): Promise<{ body: any; resp: Response 
   if (!resp.ok) {
     throw new Error(`Ollama request failed (HTTP ${resp.status})`);
   }
-  const body = await resp.json();
-  return { body, resp };
+  return { body: await resp.json(), resp };
 }
 
-// ── Rate-limit header parsing ─────────────────────────────────────
-//
-// Cloud Ollama-compatible services (Groq, Together AI, OpenRouter, etc.)
-// attach standard rate-limit headers to every response:
-//
-//   x-ratelimit-limit-requests      / x-ratelimit-remaining-requests      / x-ratelimit-reset-requests
-//   x-ratelimit-limit-tokens        / x-ratelimit-remaining-tokens        / x-ratelimit-reset-tokens
-//
-// Some use shortened forms without the "x-" prefix or the "-requests"/"-tokens" suffix.
+async function ollamaPost(url: string, payload: any = {}): Promise<any | null> {
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { ...buildHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!resp.ok) {
+      return null;
+    }
+    return resp.json();
+  } catch {
+    return null;
+  }
+}
+
+// ── Rate-limit header parsing (cloud Ollama-compatible services) ──
 
 interface RateLimitBucket {
   label: string;
   limit: number;
   remaining: number;
-  resetAt: string | null;  // ISO timestamp or duration string
+  resetAt: string | null;
 }
 
 function parseRateLimitHeaders(resp: Response): RateLimitBucket[] {
   const buckets: RateLimitBucket[] = [];
   const h = (name: string) => resp.headers.get(name);
 
-  // Helper: try multiple header name variants
   const tryParseInt = (...names: string[]): number | null => {
     for (const n of names) {
       const v = h(n);
@@ -105,75 +113,45 @@ function parseRateLimitHeaders(resp: Response): RateLimitBucket[] {
     return null;
   };
 
-  // Request limits
-  const reqLimit = tryParseInt(
-    'x-ratelimit-limit-requests',
-    'ratelimit-limit',
-    'x-ratelimit-limit',
-  );
-  const reqRemaining = tryParseInt(
-    'x-ratelimit-remaining-requests',
-    'ratelimit-remaining',
-    'x-ratelimit-remaining',
-  );
+  const reqLimit = tryParseInt('x-ratelimit-limit-requests', 'ratelimit-limit', 'x-ratelimit-limit');
+  const reqRemaining = tryParseInt('x-ratelimit-remaining-requests', 'ratelimit-remaining', 'x-ratelimit-remaining');
   if (reqLimit != null && reqRemaining != null && reqLimit > 0) {
-    const resetStr = tryGetString(
-      'x-ratelimit-reset-requests',
-      'ratelimit-reset',
-      'x-ratelimit-reset',
-    );
     buckets.push({
       label: 'Requests',
       limit: reqLimit,
       remaining: reqRemaining,
-      resetAt: resetStr,
+      resetAt: tryGetString('x-ratelimit-reset-requests', 'ratelimit-reset', 'x-ratelimit-reset'),
     });
   }
 
-  // Token limits
-  const tokLimit = tryParseInt(
-    'x-ratelimit-limit-tokens',
-  );
-  const tokRemaining = tryParseInt(
-    'x-ratelimit-remaining-tokens',
-  );
+  const tokLimit = tryParseInt('x-ratelimit-limit-tokens');
+  const tokRemaining = tryParseInt('x-ratelimit-remaining-tokens');
   if (tokLimit != null && tokRemaining != null && tokLimit > 0) {
-    const resetStr = tryGetString(
-      'x-ratelimit-reset-tokens',
-    );
     buckets.push({
       label: 'Tokens',
       limit: tokLimit,
       remaining: tokRemaining,
-      resetAt: resetStr,
+      resetAt: tryGetString('x-ratelimit-reset-tokens'),
     });
   }
 
   return buckets;
 }
 
-/**
- * Convert a rate-limit reset value to an ISO timestamp.
- * It may already be an ISO date, a Unix timestamp, or a duration like "1m30s" / "2h".
- */
 function resetToIso(reset: string): string | null {
-  // Already an ISO date?
   if (/^\d{4}-\d{2}/.test(reset)) {
     return reset;
   }
-  // Unix timestamp (seconds)?
   if (/^\d{8,}$/.test(reset)) {
     return new Date(parseInt(reset, 10) * 1000).toISOString();
   }
-  // Duration like "1m30.5s", "2h", "45s", "1d2h3m"
-  const durationRx = /(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/;
-  const m = reset.match(durationRx);
+  const m = reset.match(/(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?/);
   if (m && (m[1] || m[2] || m[3] || m[4])) {
-    const days = parseInt(m[1] || '0', 10);
-    const hours = parseInt(m[2] || '0', 10);
-    const mins = parseInt(m[3] || '0', 10);
-    const secs = parseFloat(m[4] || '0');
-    const ms = ((days * 24 + hours) * 60 + mins) * 60000 + secs * 1000;
+    const ms =
+      ((parseInt(m[1] || '0', 10) * 24 + parseInt(m[2] || '0', 10)) * 60 +
+        parseInt(m[3] || '0', 10)) *
+        60000 +
+      parseFloat(m[4] || '0') * 1000;
     if (ms > 0) {
       return new Date(Date.now() + ms).toISOString();
     }
@@ -181,74 +159,275 @@ function resetToIso(reset: string): string | null {
   return null;
 }
 
+// ── Cloud account usage via /api/me ───────────────────────────────
+//
+// When signed in, Ollama returns session/weekly usage percentages
+// and reset times directly from the local /api/me endpoint.
+
+interface CloudUsage {
+  plan: string | null;
+  sessionUsed: number | null;   // percent used
+  sessionReset: string | null;  // ISO or relative reset time
+  weeklyUsed: number | null;
+  weeklyReset: string | null;
+}
+
+function extractFloat(obj: any, ...keys: string[]): number | null {
+  for (const k of keys) {
+    const lk = k.toLowerCase();
+    for (const [key, val] of Object.entries(obj)) {
+      if (key.toLowerCase() === lk || key.toLowerCase().replace(/_/g, '') === lk.replace(/_/g, '')) {
+        const n = typeof val === 'number' ? val : typeof val === 'string' ? parseFloat(val) : NaN;
+        if (!Number.isNaN(n)) {
+          return n;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function extractUsageFromPayload(payload: any): { used: number | null; reset: string | null } {
+  if (typeof payload === 'number') {
+    return { used: payload, reset: null };
+  }
+  if (typeof payload === 'string') {
+    const n = parseFloat(payload.replace(/%$/, ''));
+    return { used: Number.isNaN(n) ? null : n, reset: null };
+  }
+  if (payload && typeof payload === 'object') {
+    const used = extractFloat(payload, 'used', 'usage', 'value', 'percent', 'pct', 'used_percent');
+    let reset: string | null = null;
+    for (const k of ['reset_at', 'resets_at', 'reset_time', 'reset']) {
+      const lk = k.toLowerCase();
+      for (const [key, val] of Object.entries(payload)) {
+        if (key.toLowerCase() === lk && typeof val === 'string' && val.trim()) {
+          reset = val.trim();
+          break;
+        }
+      }
+      if (reset) break;
+    }
+    // seconds_to_reset / reset_in
+    if (!reset) {
+      const seconds = extractFloat(payload, 'reset_in', 'reset_in_seconds', 'resets_in', 'seconds_to_reset');
+      if (seconds != null && seconds > 0) {
+        reset = new Date(Date.now() + seconds * 1000).toISOString();
+      }
+    }
+    return { used, reset };
+  }
+  return { used: null, reset: null };
+}
+
+async function fetchCloudUsage(base: string): Promise<CloudUsage> {
+  const result: CloudUsage = { plan: null, sessionUsed: null, sessionReset: null, weeklyUsed: null, weeklyReset: null };
+
+  const me = await ollamaPost(`${base}/api/me`);
+  if (!me || typeof me !== 'object') {
+    return result;
+  }
+
+  // Plan name
+  if (typeof me.plan === 'string' && me.plan.trim()) {
+    result.plan = me.plan.trim();
+  }
+
+  // Look for session/weekly usage in multiple possible locations
+  const sources = [me, me.usage, me.cloud_usage, me.quota].filter(Boolean);
+  const sessionKeys = ['session_usage', 'sessionusage', 'usage_5h', 'usagefivehour', 'five_hour_usage'];
+  const weeklyKeys = ['weekly_usage', 'weeklyusage', 'usage_1d', 'usageoneday', 'daily_usage'];
+
+  for (const src of sources) {
+    if (!src || typeof src !== 'object') continue;
+    for (const k of sessionKeys) {
+      const lk = k.toLowerCase();
+      for (const [key, val] of Object.entries(src)) {
+        if (key.toLowerCase().replace(/_/g, '') === lk.replace(/_/g, '') && result.sessionUsed == null) {
+          const { used, reset } = extractUsageFromPayload(val);
+          if (used != null) {
+            result.sessionUsed = used;
+            result.sessionReset = reset;
+          }
+        }
+      }
+    }
+    for (const k of weeklyKeys) {
+      const lk = k.toLowerCase();
+      for (const [key, val] of Object.entries(src)) {
+        if (key.toLowerCase().replace(/_/g, '') === lk.replace(/_/g, '') && result.weeklyUsed == null) {
+          const { used, reset } = extractUsageFromPayload(val);
+          if (used != null) {
+            result.weeklyUsed = used;
+            result.weeklyReset = reset;
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+// ── Desktop DB usage stats ────────────────────────────────────────
+
+interface DesktopStats {
+  messagesToday: number;
+  sessionsToday: number;
+  totalMessages: number;
+  totalChats: number;
+  cachedPlan: string | null;
+}
+
+let sqlPromise: ReturnType<typeof initSqlJs> | null = null;
+
+function getSql(): ReturnType<typeof initSqlJs> {
+  if (!sqlPromise) {
+    const wasmPath = path.join(__dirname, '..', 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
+    if (fs.existsSync(wasmPath)) {
+      sqlPromise = initSqlJs({ wasmBinary: fs.readFileSync(wasmPath) });
+    } else {
+      sqlPromise = initSqlJs();
+    }
+  }
+  return sqlPromise;
+}
+
+function queryCount(db: Database, sql: string): number {
+  try {
+    const result = db.exec(sql);
+    const val = result[0]?.values[0]?.[0];
+    return typeof val === 'number' ? val : 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function fetchDesktopStats(): Promise<DesktopStats | null> {
+  const dbPath = getOllamaDbPath();
+  if (!dbPath || !fs.existsSync(dbPath)) {
+    return null;
+  }
+
+  let db: Database | null = null;
+  try {
+    const SQL = await getSql();
+    db = new SQL.Database(fs.readFileSync(dbPath));
+
+    const stats: DesktopStats = {
+      messagesToday: queryCount(db, "SELECT COUNT(*) FROM messages WHERE date(created_at)=date('now','localtime')"),
+      sessionsToday: queryCount(db, "SELECT COUNT(*) FROM chats WHERE date(created_at)=date('now','localtime')"),
+      totalMessages: queryCount(db, 'SELECT COUNT(*) FROM messages'),
+      totalChats: queryCount(db, 'SELECT COUNT(*) FROM chats'),
+      cachedPlan: null,
+    };
+
+    // Try to read cached user plan
+    try {
+      const userResult = db.exec('SELECT plan FROM users LIMIT 1');
+      const plan = userResult[0]?.values[0]?.[0];
+      if (typeof plan === 'string' && plan.trim()) {
+        stats.cachedPlan = plan.trim();
+      }
+    } catch { /* users table may not exist in older versions */ }
+
+    return stats;
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
 // ── Probe ─────────────────────────────────────────────────────────
 
 export async function probeOllama(): Promise<{ plan?: string | null; lines: MetricLine[] }> {
   const base = getOllamaBaseUrl();
 
-  // 1. Version — also serves as the liveness check.
+  // 1. Version — liveness check
   let version = '';
   let rateLimits: RateLimitBucket[] = [];
   try {
-    const { body, resp } = await ollamaFetchRaw(`${base}/api/version`);
+    const { body, resp } = await ollamaGet(`${base}/api/version`);
     version = (body as any).version ?? '';
-    // Capture rate-limit headers from this first response
     rateLimits = parseRateLimitHeaders(resp);
   } catch {
     throw new Error(`Ollama not running at ${base}. Start Ollama and try again.`);
   }
 
-  // 2. Running models (`/api/ps`)
+  // 2. Running models (/api/ps)
   let runningModels: any[] = [];
   try {
-    const { body, resp } = await ollamaFetchRaw(`${base}/api/ps`);
+    const { body, resp } = await ollamaGet(`${base}/api/ps`);
     runningModels = (body as any).models ?? [];
-    // If version response had no rate-limit headers, try from ps
     if (rateLimits.length === 0) {
       rateLimits = parseRateLimitHeaders(resp);
     }
-  } catch {
-    // Non-fatal — old Ollama versions may not have /api/ps
-  }
+  } catch { /* non-fatal */ }
 
-  // 3. Available models (`/api/tags`)
+  // 3. Available models (/api/tags)
   let availableCount = 0;
   try {
-    const { body, resp } = await ollamaFetchRaw(`${base}/api/tags`);
+    const { body, resp } = await ollamaGet(`${base}/api/tags`);
     availableCount = ((body as any).models ?? []).length;
-    // Try rate-limit headers from tags if still empty
     if (rateLimits.length === 0) {
       rateLimits = parseRateLimitHeaders(resp);
     }
-  } catch {
-    // Non-fatal
-  }
+  } catch { /* non-fatal */ }
+
+  // 4. Cloud account usage (/api/me) — session & weekly usage bars
+  const cloud = await fetchCloudUsage(base);
+
+  // 5. Desktop DB stats (messages, sessions)
+  const desktop = await fetchDesktopStats();
 
   // ── Build metric lines ─────────────────────────────────────────
   const lines: MetricLine[] = [];
   const isCloud = rateLimits.length > 0;
+  const plan = cloud.plan || desktop?.cachedPlan || null;
 
   // Status badge
   const versionLabel = version ? `Running (v${version})` : 'Running';
   lines.push({ type: 'badge', label: 'Server', text: versionLabel, color: '#4ade80' });
 
-  // ── Rate-limit usage bars (cloud services only) ────────────────
+  // ── Cloud usage bars (from /api/me) ────────────────────────────
+  if (cloud.sessionUsed != null) {
+    lines.push({
+      type: 'progress',
+      label: 'Session usage',
+      used: Math.min(Math.max(cloud.sessionUsed, 0), 100),
+      limit: 100,
+      format: { kind: 'percent' },
+      resetsAt: cloud.sessionReset,
+    });
+  }
+
+  if (cloud.weeklyUsed != null) {
+    lines.push({
+      type: 'progress',
+      label: 'Weekly usage',
+      used: Math.min(Math.max(cloud.weeklyUsed, 0), 100),
+      limit: 100,
+      format: { kind: 'percent' },
+      resetsAt: cloud.weeklyReset,
+    });
+  }
+
+  // ── Rate-limit usage bars (cloud-hosted services: Groq, etc.) ──
   for (const bucket of rateLimits) {
     const used = bucket.limit - bucket.remaining;
     const pct = Math.min(Math.max(Math.round((used / bucket.limit) * 100), 0), 100);
-    const resetIso = bucket.resetAt ? resetToIso(bucket.resetAt) : null;
-
     lines.push({
       type: 'progress',
       label: bucket.label,
       used: pct,
       limit: 100,
       format: { kind: 'percent' },
-      resetsAt: resetIso,
+      resetsAt: bucket.resetAt ? resetToIso(bucket.resetAt) : null,
     });
   }
 
-  // ── Model count summary ────────────────────────────────────────
+  // ── Model count ────────────────────────────────────────────────
   const loadedCount = runningModels.length;
   const countText =
     availableCount > 0
@@ -258,7 +437,7 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
         : 'No models loaded';
   lines.push({ type: 'text', label: 'Models', value: countText });
 
-  // Per-loaded-model detail lines
+  // ── Per-loaded-model details ───────────────────────────────────
   for (const m of runningModels) {
     const name: string = m.name ?? m.model ?? 'unknown';
     const vram: number | null = typeof m.size_vram === 'number' ? m.size_vram : null;
@@ -279,19 +458,22 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
       parts.push(quant);
     }
 
-    const detail = parts.length > 0 ? parts.join(' · ') : '';
-    lines.push({ type: 'text', label: name, value: detail });
+    lines.push({ type: 'text', label: name, value: parts.length > 0 ? parts.join(' · ') : '' });
   }
 
-  // If the server is local with no rate limits and no models, add a hint
-  if (!isCloud && loadedCount === 0 && availableCount === 0) {
-    lines.push({
-      type: 'badge',
-      label: 'Hint',
-      text: 'Local Ollama has no usage limits',
-      color: '#a3a3a3',
-    });
+  // ── Desktop DB stats ───────────────────────────────────────────
+  if (desktop) {
+    if (desktop.messagesToday > 0) {
+      lines.push({ type: 'text', label: 'Today', value: `${desktop.messagesToday} messages · ${desktop.sessionsToday} sessions` });
+    } else if (desktop.totalMessages > 0) {
+      lines.push({ type: 'text', label: 'All time', value: `${desktop.totalMessages} messages · ${desktop.totalChats} chats` });
+    }
   }
 
-  return { plan: null, lines };
+  // If purely local with nothing interesting, show a hint
+  if (!isCloud && cloud.sessionUsed == null && loadedCount === 0 && availableCount === 0 && !desktop?.totalMessages) {
+    lines.push({ type: 'badge', label: 'Hint', text: 'Local Ollama has no usage limits', color: '#a3a3a3' });
+  }
+
+  return { plan, lines };
 }

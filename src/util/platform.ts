@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
 
 /**
  * Platform-aware path helpers — ported from the Rust providers.
@@ -91,8 +92,6 @@ export function getGhHostsPath(): string | null {
 }
 
 export function getGhExecutablePath(): string | null {
-  const fs = require('fs') as typeof import('fs');
-
   if (process.platform === 'win32') {
     const candidates = [
       'C:\\Program Files\\GitHub CLI\\gh.exe',
@@ -118,4 +117,22 @@ export function getGhExecutablePath(): string | null {
     }
   }
   return null;
+}
+
+export function getOllamaDbPath(): string | null {
+  if (process.platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA;
+    if (localAppData) {
+      return path.join(localAppData, 'Ollama', 'db.sqlite');
+    }
+    return path.join(os.homedir(), 'AppData', 'Local', 'Ollama', 'db.sqlite');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'Ollama', 'db.sqlite');
+  }
+  // Linux
+  const xdg = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  const primary = path.join(xdg, 'Ollama', 'db.sqlite');
+  const fallback = path.join(os.homedir(), '.config', 'Ollama', 'db.sqlite');
+  return fs.existsSync(primary) ? primary : fallback;
 }
