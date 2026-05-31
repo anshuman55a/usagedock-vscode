@@ -2,9 +2,7 @@ import * as fs from 'fs';
 import * as vscode from 'vscode';
 import type { MetricLine } from './types';
 import { getOllamaDbPath } from '../util/platform';
-import { readDbValue } from '../util/sqlite';
-import initSqlJs, { type Database } from 'sql.js';
-import * as path from 'path';
+import Database from 'better-sqlite3';
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -279,40 +277,24 @@ interface DesktopStats {
   cachedPlan: string | null;
 }
 
-let sqlPromise: ReturnType<typeof initSqlJs> | null = null;
-
-function getSql(): ReturnType<typeof initSqlJs> {
-  if (!sqlPromise) {
-    const wasmPath = path.join(__dirname, '..', 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
-    if (fs.existsSync(wasmPath)) {
-      sqlPromise = initSqlJs({ wasmBinary: fs.readFileSync(wasmPath) });
-    } else {
-      sqlPromise = initSqlJs();
-    }
-  }
-  return sqlPromise;
-}
-
-function queryCount(db: Database, sql: string): number {
+function queryCount(db: Database.Database, sql: string): number {
   try {
-    const result = db.exec(sql);
-    const val = result[0]?.values[0]?.[0];
-    return typeof val === 'number' ? val : 0;
+    const row = db.prepare(sql).get() as { 'COUNT(*)': number } | undefined;
+    return row?.['COUNT(*)'] ?? 0;
   } catch {
     return 0;
   }
 }
 
-async function fetchDesktopStats(): Promise<DesktopStats | null> {
+function fetchDesktopStats(): DesktopStats | null {
   const dbPath = getOllamaDbPath();
   if (!dbPath || !fs.existsSync(dbPath)) {
     return null;
   }
 
-  let db: Database | null = null;
+  let db: Database.Database | null = null;
   try {
-    const SQL = await getSql();
-    db = new SQL.Database(fs.readFileSync(dbPath));
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
 
     const stats: DesktopStats = {
       messagesToday: queryCount(db, "SELECT COUNT(*) FROM messages WHERE date(created_at)=date('now','localtime')"),
@@ -324,15 +306,15 @@ async function fetchDesktopStats(): Promise<DesktopStats | null> {
 
     // Try to read cached user plan
     try {
-      const userResult = db.exec('SELECT plan FROM users LIMIT 1');
-      const plan = userResult[0]?.values[0]?.[0];
-      if (typeof plan === 'string' && plan.trim()) {
-        stats.cachedPlan = plan.trim();
+      const row = db.prepare('SELECT plan FROM users LIMIT 1').get() as { plan: string } | undefined;
+      if (row?.plan?.trim()) {
+        stats.cachedPlan = row.plan.trim();
       }
     } catch { /* users table may not exist in older versions */ }
 
     return stats;
-  } catch {
+  } catch (err) {
+    console.error('UsageDock: Ollama desktop DB read failed:', err);
     return null;
   } finally {
     db?.close();
@@ -379,7 +361,7 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
   const cloud = await fetchCloudUsage(base);
 
   // 5. Desktop DB stats (messages, sessions)
-  const desktop = await fetchDesktopStats();
+  const desktop = fetchDesktopStats();
 
   // ── Build metric lines ─────────────────────────────────────────
   const lines: MetricLine[] = [];
