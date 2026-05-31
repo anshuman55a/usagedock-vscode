@@ -164,8 +164,10 @@ function resetToIso(reset: string): string | null {
 
 interface CloudUsage {
   plan: string | null;
-  sessionUsed: number | null;   // percent used
-  sessionReset: string | null;  // ISO or relative reset time
+  accountName: string | null;
+  accountEmail: string | null;
+  sessionUsed: number | null;   // percent used — only on paid plans
+  sessionReset: string | null;
   weeklyUsed: number | null;
   weeklyReset: string | null;
 }
@@ -219,16 +221,22 @@ function extractUsageFromPayload(payload: any): { used: number | null; reset: st
 }
 
 async function fetchCloudUsage(base: string): Promise<CloudUsage> {
-  const result: CloudUsage = { plan: null, sessionUsed: null, sessionReset: null, weeklyUsed: null, weeklyReset: null };
+  const result: CloudUsage = { plan: null, accountName: null, accountEmail: null, sessionUsed: null, sessionReset: null, weeklyUsed: null, weeklyReset: null };
 
   const me = await ollamaPost(`${base}/api/me`);
   if (!me || typeof me !== 'object') {
     return result;
   }
 
-  // Plan name
+  // Account info
   if (typeof me.plan === 'string' && me.plan.trim()) {
     result.plan = me.plan.trim();
+  }
+  if (typeof me.name === 'string' && me.name.trim()) {
+    result.accountName = me.name.trim();
+  }
+  if (typeof me.email === 'string' && me.email.trim()) {
+    result.accountEmail = me.email.trim();
   }
 
   // Look for session/weekly usage in multiple possible locations
@@ -279,8 +287,10 @@ interface DesktopStats {
 
 function queryCount(db: Database.Database, sql: string): number {
   try {
-    const row = db.prepare(sql).get() as { 'COUNT(*)': number } | undefined;
-    return row?.['COUNT(*)'] ?? 0;
+    const row = db.prepare(sql).get() as Record<string, number> | undefined;
+    if (!row) { return 0; }
+    // better-sqlite3 returns column by its exact name — use alias 'c'
+    return row['c'] ?? row['COUNT(*)'] ?? Object.values(row)[0] ?? 0;
   } catch {
     return 0;
   }
@@ -297,10 +307,10 @@ function fetchDesktopStats(): DesktopStats | null {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
 
     const stats: DesktopStats = {
-      messagesToday: queryCount(db, "SELECT COUNT(*) FROM messages WHERE date(created_at)=date('now','localtime')"),
-      sessionsToday: queryCount(db, "SELECT COUNT(*) FROM chats WHERE date(created_at)=date('now','localtime')"),
-      totalMessages: queryCount(db, 'SELECT COUNT(*) FROM messages'),
-      totalChats: queryCount(db, 'SELECT COUNT(*) FROM chats'),
+      messagesToday: queryCount(db, "SELECT COUNT(*) as c FROM messages WHERE date(created_at)=date('now','localtime')"),
+      sessionsToday: queryCount(db, "SELECT COUNT(*) as c FROM chats WHERE date(created_at)=date('now','localtime')"),
+      totalMessages: queryCount(db, 'SELECT COUNT(*) as c FROM messages'),
+      totalChats: queryCount(db, 'SELECT COUNT(*) as c FROM chats'),
       cachedPlan: null,
     };
 
@@ -372,7 +382,13 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
   const versionLabel = version ? `Running (v${version})` : 'Running';
   lines.push({ type: 'badge', label: 'Server', text: versionLabel, color: '#4ade80' });
 
-  // ── Cloud usage bars (from /api/me) ────────────────────────────
+  // ── Account info (from /api/me) ────────────────────────────────
+  if (cloud.accountName || cloud.accountEmail) {
+    const accountLabel = cloud.accountName || cloud.accountEmail!;
+    lines.push({ type: 'text', label: 'Account', value: accountLabel });
+  }
+
+  // ── Cloud usage bars (from /api/me — paid plans only) ──────────
   if (cloud.sessionUsed != null) {
     lines.push({
       type: 'progress',
@@ -393,6 +409,11 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
       format: { kind: 'percent' },
       resetsAt: cloud.weeklyReset,
     });
+  }
+
+  // Free plan: no usage bars available from API — show informational note
+  if (cloud.accountName != null && cloud.sessionUsed == null && cloud.weeklyUsed == null && !isCloud) {
+    lines.push({ type: 'badge', label: 'Usage', text: 'No limits on free plan', color: '#22c55e' });
   }
 
   // ── Rate-limit usage bars (cloud-hosted services: Groq, etc.) ──
@@ -433,12 +454,8 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
     } else if (size != null && size > 0) {
       parts.push(formatBytes(size));
     }
-    if (paramSize) {
-      parts.push(paramSize);
-    }
-    if (quant) {
-      parts.push(quant);
-    }
+    if (paramSize) { parts.push(paramSize); }
+    if (quant) { parts.push(quant); }
 
     lines.push({ type: 'text', label: name, value: parts.length > 0 ? parts.join(' · ') : '' });
   }
@@ -446,14 +463,15 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
   // ── Desktop DB stats ───────────────────────────────────────────
   if (desktop) {
     if (desktop.messagesToday > 0) {
-      lines.push({ type: 'text', label: 'Today', value: `${desktop.messagesToday} messages · ${desktop.sessionsToday} sessions` });
-    } else if (desktop.totalMessages > 0) {
-      lines.push({ type: 'text', label: 'All time', value: `${desktop.totalMessages} messages · ${desktop.totalChats} chats` });
+      lines.push({ type: 'text', label: 'Today', value: `${desktop.messagesToday} msgs · ${desktop.sessionsToday} sessions` });
+    }
+    if (desktop.totalMessages > 0) {
+      lines.push({ type: 'text', label: 'All time', value: `${desktop.totalMessages} msgs · ${desktop.totalChats} chats` });
     }
   }
 
-  // If purely local with nothing interesting, show a hint
-  if (!isCloud && cloud.sessionUsed == null && loadedCount === 0 && availableCount === 0 && !desktop?.totalMessages) {
+  // Purely local, not signed in, no models — generic hint
+  if (!isCloud && !cloud.accountName && loadedCount === 0 && availableCount === 0 && !desktop?.totalMessages) {
     lines.push({ type: 'badge', label: 'Hint', text: 'Local Ollama has no usage limits', color: '#a3a3a3' });
   }
 

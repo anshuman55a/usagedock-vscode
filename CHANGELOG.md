@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4
+
+- Enhanced Ollama tracking: added cloud account usage from `/api/me` endpoint, showing session usage and weekly usage as progress bars when signed into an Ollama account.
+- Added Ollama desktop SQLite DB reader (`db.sqlite`) to surface local message and session counts (today and all-time).
+- Added `getOllamaDbPath()` with platform-aware paths for Windows, macOS, and Linux.
+
 ## 0.1.3
 
 - Removed bundled Google OAuth client credentials from Antigravity support.
