@@ -45,6 +45,11 @@ function buildHeaders(): Record<string, string> {
   return headers;
 }
 
+/** Validates that an API key looks like a plausible token before sending it externally. */
+function isValidApiKey(key: string): boolean {
+  return typeof key === 'string' && key.length >= 8 && key.length <= 256 && /^[\w\-.:+=/]+$/.test(key);
+}
+
 async function ollamaGet(url: string): Promise<{ body: any; resp: Response }> {
   const resp = await fetch(url, {
     method: 'GET',
@@ -229,12 +234,13 @@ async function fetchCloudUsage(base: string): Promise<CloudUsage> {
   const localMe = await ollamaPost(`${base}/api/me`);
 
   // If we have an API key, also try the cloud endpoint which returns richer data
-  const apiKey = getOllamaApiKey() || process.env.OLLAMA_API_KEY || '';
+  const rawApiKey = getOllamaApiKey() || process.env.OLLAMA_API_KEY || '';
+  const apiKey = isValidApiKey(rawApiKey) ? rawApiKey : '';
   let cloudMe: any = null;
   if (apiKey) {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 8000);
     try {
-      const ctrl = new AbortController();
-      const timeout = setTimeout(() => ctrl.abort(), 8000);
       const res = await fetch('https://ollama.com/api/me', {
         method: 'POST',
         headers: {
@@ -245,11 +251,12 @@ async function fetchCloudUsage(base: string): Promise<CloudUsage> {
         body: '{}',
         signal: ctrl.signal,
       });
-      clearTimeout(timeout);
       if (res.ok) {
         cloudMe = await res.json();
       }
-    } catch { /* cloud unreachable — use local data */ }
+    } catch { /* cloud unreachable — use local data */ } finally {
+      clearTimeout(timeout);
+    }
   }
 
   // Prefer cloud response (PascalCase: Plan, Name, Email) over local (lowercase)
@@ -380,7 +387,9 @@ const INFERENCE_PATHS = new Set(['/api/chat', '/api/generate', '/v1/chat/complet
 
 function getOllamaLogDir(): string {
   if (process.platform === 'win32') {
-    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Ollama');
+    const localAppData = process.env.LOCALAPPDATA;
+    const base = (localAppData && path.isAbsolute(localAppData)) ? localAppData : path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(base, 'Ollama');
   }
   if (process.platform === 'darwin') {
     return path.join(os.homedir(), '.ollama', 'logs');
@@ -420,7 +429,21 @@ function fetchServerLogStats(): ServerLogStats | null {
   for (const file of logFiles) {
     let content: string;
     try {
-      content = fs.readFileSync(file, 'utf8');
+      // Read only the tail of large logs to avoid blocking the extension host
+      const MAX_LOG_BYTES = 2 * 1024 * 1024; // 2 MB
+      const stat = fs.statSync(file);
+      if (stat.size <= MAX_LOG_BYTES) {
+        content = fs.readFileSync(file, 'utf8');
+      } else {
+        const fd = fs.openSync(file, 'r');
+        try {
+          const buf = Buffer.alloc(MAX_LOG_BYTES);
+          fs.readSync(fd, buf, 0, MAX_LOG_BYTES, stat.size - MAX_LOG_BYTES);
+          content = buf.toString('utf8');
+        } finally {
+          fs.closeSync(fd);
+        }
+      }
     } catch { continue; }
 
     for (const line of content.split('\n')) {
@@ -470,13 +493,13 @@ interface SettingsPageUsage {
 }
 
 async function fetchSettingsPageUsage(): Promise<SettingsPageUsage | null> {
-  const apiKey = getOllamaApiKey() || process.env.OLLAMA_API_KEY || '';
+  const rawKey = getOllamaApiKey() || process.env.OLLAMA_API_KEY || '';
+  const apiKey = isValidApiKey(rawKey) ? rawKey : '';
   if (!apiKey) { return null; }
 
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 8000);
   try {
-    const ctrl = new AbortController();
-    const timeout = setTimeout(() => ctrl.abort(), 8000);
-
     const res = await fetch('https://ollama.com/settings', {
       headers: {
         Accept: 'text/html,application/xhtml+xml',
@@ -484,11 +507,16 @@ async function fetchSettingsPageUsage(): Promise<SettingsPageUsage | null> {
       },
       signal: ctrl.signal,
     });
-    clearTimeout(timeout);
 
     if (res.status !== 200) { return null; }
 
+    // Cap response size to prevent OOM from unexpectedly large pages
+    const MAX_HTML_BYTES = 512 * 1024;
+    const contentLength = parseInt(res.headers.get('content-length') || '0', 10);
+    if (contentLength > MAX_HTML_BYTES) { return null; }
     const html = await res.text();
+    if (html.length > MAX_HTML_BYTES) { return null; }
+
     const result: SettingsPageUsage = { sessionUsed: null, sessionReset: null, weeklyUsed: null, weeklyReset: null };
 
     // Regex matching: "Session usage</span><span...>0.5% used</span>"
@@ -501,13 +529,22 @@ async function fetchSettingsPageUsage(): Promise<SettingsPageUsage | null> {
       else if (label === 'weekly usage') { result.weeklyUsed = value; }
     }
 
-    // Regex matching: "Session usage...data-time="2026-06-07T12:00:00Z""
-    const resetRe = /(Session usage|Weekly usage)[\s\S]*?data-time="([^"]+)"/gi;
-    while ((m = resetRe.exec(html)) !== null) {
-      const label = m[1].toLowerCase();
-      const timeStr = m[2];
-      if (label === 'session usage') { result.sessionReset = timeStr; }
-      else if (label === 'weekly usage') { result.weeklyReset = timeStr; }
+    // Parse reset times safely — avoid catastrophic backtracking by using
+    // indexOf + bounded substring instead of [\s\S]*? across the full HTML.
+    const htmlLower = html.toLowerCase();
+    for (const label of ['session usage', 'weekly usage'] as const) {
+      const idx = htmlLower.indexOf(label);
+      if (idx === -1) continue;
+      // Only search within 2000 chars after the label for the data-time attribute
+      const slice = html.substring(idx, idx + 2000);
+      const dtMatch = /data-time="([^"]{1,64})"/.exec(slice);
+      if (!dtMatch) continue;
+      // Validate extracted timestamp is a real date before using it
+      const parsed = new Date(dtMatch[1]);
+      if (isNaN(parsed.getTime())) continue;
+      const iso = parsed.toISOString();
+      if (label === 'session usage') { result.sessionReset = iso; }
+      else { result.weeklyReset = iso; }
     }
 
     if (result.sessionUsed != null || result.weeklyUsed != null) {
@@ -516,6 +553,8 @@ async function fetchSettingsPageUsage(): Promise<SettingsPageUsage | null> {
     return null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
