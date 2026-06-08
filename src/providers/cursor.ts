@@ -37,7 +37,7 @@ async function refreshToken(refreshTok: string): Promise<string> {
     throw new Error(`Refresh failed (HTTP ${resp.status})`);
   }
 
-  const body = await resp.json();
+  const body: any = await resp.json();
   if (body.shouldLogout === true) {
     throw new Error('Session expired. Sign in via Cursor app.');
   }
