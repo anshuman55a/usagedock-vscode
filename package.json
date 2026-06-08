@@ -47,7 +47,8 @@
         {
           "type": "webview",
           "id": "usagedock.panel",
-          "name": "Usage"
+          "name": "Usage",
+          "icon": "resources/bolt.svg"
         }
       ]
     },
