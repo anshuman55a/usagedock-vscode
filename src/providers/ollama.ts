@@ -1,4 +1,6 @@
 import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 import * as vscode from 'vscode';
 import type { MetricLine } from './types';
 import { getOllamaDbPath } from '../util/platform';
@@ -223,33 +225,63 @@ function extractUsageFromPayload(payload: any): { used: number | null; reset: st
 async function fetchCloudUsage(base: string): Promise<CloudUsage> {
   const result: CloudUsage = { plan: null, accountName: null, accountEmail: null, sessionUsed: null, sessionReset: null, weeklyUsed: null, weeklyReset: null };
 
-  const me = await ollamaPost(`${base}/api/me`);
+  // Try local /api/me first (always available when Ollama is running)
+  const localMe = await ollamaPost(`${base}/api/me`);
+
+  // If we have an API key, also try the cloud endpoint which returns richer data
+  const apiKey = getOllamaApiKey() || process.env.OLLAMA_API_KEY || '';
+  let cloudMe: any = null;
+  if (apiKey) {
+    try {
+      const ctrl = new AbortController();
+      const timeout = setTimeout(() => ctrl.abort(), 8000);
+      const res = await fetch('https://ollama.com/api/me', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+        },
+        body: '{}',
+        signal: ctrl.signal,
+      });
+      clearTimeout(timeout);
+      if (res.ok) {
+        cloudMe = await res.json();
+      }
+    } catch { /* cloud unreachable — use local data */ }
+  }
+
+  // Prefer cloud response (PascalCase: Plan, Name, Email) over local (lowercase)
+  const me = cloudMe || localMe;
   if (!me || typeof me !== 'object') {
     return result;
   }
 
-  // Account info
-  if (typeof me.plan === 'string' && me.plan.trim()) {
-    result.plan = me.plan.trim();
-  }
-  if (typeof me.name === 'string' && me.name.trim()) {
-    result.accountName = me.name.trim();
-  }
-  if (typeof me.email === 'string' && me.email.trim()) {
-    result.accountEmail = me.email.trim();
-  }
+  // Extract account info — handle both PascalCase (cloud) and lowercase (local)
+  const getString = (obj: any, ...keys: string[]): string | null => {
+    for (const k of keys) {
+      const val = obj[k];
+      if (typeof val === 'string' && val.trim()) return val.trim();
+    }
+    return null;
+  };
+
+  result.plan = getString(me, 'Plan', 'plan');
+  result.accountName = getString(me, 'Name', 'name');
+  result.accountEmail = getString(me, 'Email', 'email');
 
   // Look for session/weekly usage in multiple possible locations
-  const sources = [me, me.usage, me.cloud_usage, me.quota].filter(Boolean);
-  const sessionKeys = ['session_usage', 'sessionusage', 'usage_5h', 'usagefivehour', 'five_hour_usage'];
-  const weeklyKeys = ['weekly_usage', 'weeklyusage', 'usage_1d', 'usageoneday', 'daily_usage'];
+  const sources = [me, me.usage, me.cloud_usage, me.quota, me.Usage, me.CloudUsage, me.Quota].filter(Boolean);
+  const sessionKeys = ['session_usage', 'sessionusage', 'usage_5h', 'usagefivehour', 'five_hour_usage', 'SessionUsage', 'FiveHourUsage'];
+  const weeklyKeys = ['weekly_usage', 'weeklyusage', 'usage_1d', 'usageoneday', 'daily_usage', 'WeeklyUsage', 'DailyUsage'];
 
   for (const src of sources) {
     if (!src || typeof src !== 'object') continue;
     for (const k of sessionKeys) {
-      const lk = k.toLowerCase();
+      const lk = k.toLowerCase().replace(/_/g, '');
       for (const [key, val] of Object.entries(src)) {
-        if (key.toLowerCase().replace(/_/g, '') === lk.replace(/_/g, '') && result.sessionUsed == null) {
+        if (key.toLowerCase().replace(/_/g, '') === lk && result.sessionUsed == null) {
           const { used, reset } = extractUsageFromPayload(val);
           if (used != null) {
             result.sessionUsed = used;
@@ -259,9 +291,9 @@ async function fetchCloudUsage(base: string): Promise<CloudUsage> {
       }
     }
     for (const k of weeklyKeys) {
-      const lk = k.toLowerCase();
+      const lk = k.toLowerCase().replace(/_/g, '');
       for (const [key, val] of Object.entries(src)) {
-        if (key.toLowerCase().replace(/_/g, '') === lk.replace(/_/g, '') && result.weeklyUsed == null) {
+        if (key.toLowerCase().replace(/_/g, '') === lk && result.weeklyUsed == null) {
           const { used, reset } = extractUsageFromPayload(val);
           if (used != null) {
             result.weeklyUsed = used;
@@ -331,6 +363,162 @@ function fetchDesktopStats(): DesktopStats | null {
   }
 }
 
+// ── Server log parsing ───────────────────────────────────────────
+// Parses GIN-format lines from Ollama server logs to count requests.
+// Format: [GIN] 2026/06/01 - 09:57:34 | 200 |  4.108573s | 127.0.0.1 | POST "/api/chat"
+
+interface ServerLogStats {
+  requestsToday: number;
+  requests5h: number;
+  requests24h: number;
+  chatRequestsToday: number;
+  generateRequestsToday: number;
+}
+
+const GIN_RE = /^\[GIN\]\s+(\d{4}\/\d{2}\/\d{2})\s+-\s+(\d{2}:\d{2}:\d{2})\s+\|\s+(\d+)\s+\|[^|]*\|\s+[^|]*\|\s+\w+\s+"([^"]+)"/;
+const INFERENCE_PATHS = new Set(['/api/chat', '/api/generate', '/v1/chat/completions', '/v1/completions', '/v1/responses', '/v1/messages']);
+
+function getOllamaLogDir(): string {
+  if (process.platform === 'win32') {
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Ollama');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), '.ollama', 'logs');
+  }
+  // Linux: systemd journal is typical, but some installs use ~/.ollama/logs
+  return path.join(os.homedir(), '.ollama', 'logs');
+}
+
+function fetchServerLogStats(): ServerLogStats | null {
+  const logDir = getOllamaLogDir();
+  if (!fs.existsSync(logDir)) { return null; }
+
+  // Find server-*.log files
+  let logFiles: string[];
+  try {
+    logFiles = fs.readdirSync(logDir)
+      .filter(f => /^server-?\d*\.log$/i.test(f))
+      .map(f => path.join(logDir, f));
+  } catch {
+    return null;
+  }
+  if (logFiles.length === 0) { return null; }
+
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${String(now.getDate()).padStart(2, '0')}`;
+  const fiveHoursAgo = new Date(now.getTime() - 5 * 60 * 60 * 1000);
+  const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+  const stats: ServerLogStats = {
+    requestsToday: 0,
+    requests5h: 0,
+    requests24h: 0,
+    chatRequestsToday: 0,
+    generateRequestsToday: 0,
+  };
+
+  for (const file of logFiles) {
+    let content: string;
+    try {
+      content = fs.readFileSync(file, 'utf8');
+    } catch { continue; }
+
+    for (const line of content.split('\n')) {
+      const match = GIN_RE.exec(line);
+      if (!match) { continue; }
+
+      const [, dateStr, timeStr, , urlPath] = match;
+      if (!INFERENCE_PATHS.has(urlPath)) { continue; }
+
+      // Parse timestamp
+      const ts = new Date(`${dateStr.replace(/\//g, '-')}T${timeStr}`);
+      if (isNaN(ts.getTime())) { continue; }
+
+      if (ts >= twentyFourHoursAgo) {
+        stats.requests24h++;
+      }
+      if (ts >= fiveHoursAgo) {
+        stats.requests5h++;
+      }
+      if (dateStr === todayStr) {
+        stats.requestsToday++;
+        if (urlPath === '/api/chat' || urlPath === '/v1/chat/completions') {
+          stats.chatRequestsToday++;
+        } else if (urlPath === '/api/generate' || urlPath === '/v1/completions') {
+          stats.generateRequestsToday++;
+        }
+      }
+    }
+  }
+
+  if (stats.requestsToday === 0 && stats.requests24h === 0) {
+    return null;
+  }
+  return stats;
+}
+
+// ── Cloud settings page scraper ──────────────────────────────────
+// Fetches usage percentages by scraping https://ollama.com/settings.
+// Reads API key from extension setting (usagedock.ollama.apiKey) or OLLAMA_API_KEY env.
+// This mirrors the Go reference: fetchCloudUsageFromSettingsPage()
+
+interface SettingsPageUsage {
+  sessionUsed: number | null;
+  sessionReset: string | null;
+  weeklyUsed: number | null;
+  weeklyReset: string | null;
+}
+
+async function fetchSettingsPageUsage(): Promise<SettingsPageUsage | null> {
+  const apiKey = getOllamaApiKey() || process.env.OLLAMA_API_KEY || '';
+  if (!apiKey) { return null; }
+
+  try {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), 8000);
+
+    const res = await fetch('https://ollama.com/settings', {
+      headers: {
+        Accept: 'text/html,application/xhtml+xml',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal: ctrl.signal,
+    });
+    clearTimeout(timeout);
+
+    if (res.status !== 200) { return null; }
+
+    const html = await res.text();
+    const result: SettingsPageUsage = { sessionUsed: null, sessionReset: null, weeklyUsed: null, weeklyReset: null };
+
+    // Regex matching: "Session usage</span><span...>0.5% used</span>"
+    const usageRe = /(Session usage|Weekly usage)\s*<\/span>\s*<span[^>]*>\s*([0-9]+(?:\.[0-9]+)?)%\s*used\s*<\/span>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = usageRe.exec(html)) !== null) {
+      const label = m[1].toLowerCase();
+      const value = parseFloat(m[2]);
+      if (label === 'session usage') { result.sessionUsed = value; }
+      else if (label === 'weekly usage') { result.weeklyUsed = value; }
+    }
+
+    // Regex matching: "Session usage...data-time="2026-06-07T12:00:00Z""
+    const resetRe = /(Session usage|Weekly usage)[\s\S]*?data-time="([^"]+)"/gi;
+    while ((m = resetRe.exec(html)) !== null) {
+      const label = m[1].toLowerCase();
+      const timeStr = m[2];
+      if (label === 'session usage') { result.sessionReset = timeStr; }
+      else if (label === 'weekly usage') { result.weeklyReset = timeStr; }
+    }
+
+    if (result.sessionUsed != null || result.weeklyUsed != null) {
+      return result;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Probe ─────────────────────────────────────────────────────────
 
 export async function probeOllama(): Promise<{ plan?: string | null; lines: MetricLine[] }> {
@@ -372,6 +560,21 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
 
   // 5. Desktop DB stats (messages, sessions)
   const desktop = fetchDesktopStats();
+
+  // 6. Server log stats (request counts from GIN logs)
+  const logStats = fetchServerLogStats();
+
+  // 7. Cloud settings page scraper — gets usage % when /api/me doesn't have it
+  //    Uses API key from extension settings (Usagedock > Ollama: Api Key)
+  if (cloud.sessionUsed == null && cloud.weeklyUsed == null) {
+    const settingsUsage = await fetchSettingsPageUsage();
+    if (settingsUsage) {
+      cloud.sessionUsed = settingsUsage.sessionUsed;
+      cloud.sessionReset = settingsUsage.sessionReset;
+      cloud.weeklyUsed = settingsUsage.weeklyUsed;
+      cloud.weeklyReset = settingsUsage.weeklyReset;
+    }
+  }
 
   // ── Build metric lines ─────────────────────────────────────────
   const lines: MetricLine[] = [];
@@ -470,8 +673,32 @@ export async function probeOllama(): Promise<{ plan?: string | null; lines: Metr
     }
   }
 
-  // Purely local, not signed in, no models — generic hint
-  if (!isCloud && !cloud.accountName && loadedCount === 0 && availableCount === 0 && !desktop?.totalMessages) {
+  // ── Server log request counts ──────────────────────────────────
+  if (logStats) {
+    const logParts: string[] = [];
+    if (logStats.requestsToday > 0) {
+      logParts.push(`${logStats.requestsToday} today`);
+    }
+    if (logStats.requests5h > 0) {
+      logParts.push(`${logStats.requests5h} last 5h`);
+    }
+    if (logStats.requests24h > 0 && logStats.requests24h !== logStats.requestsToday) {
+      logParts.push(`${logStats.requests24h} last 24h`);
+    }
+    if (logParts.length > 0) {
+      lines.push({ type: 'text', label: 'Requests', value: logParts.join(' · ') });
+    }
+    // Chat vs generate breakdown
+    if (logStats.chatRequestsToday > 0 || logStats.generateRequestsToday > 0) {
+      const breakdown: string[] = [];
+      if (logStats.chatRequestsToday > 0) { breakdown.push(`${logStats.chatRequestsToday} chat`); }
+      if (logStats.generateRequestsToday > 0) { breakdown.push(`${logStats.generateRequestsToday} generate`); }
+      lines.push({ type: 'text', label: 'Breakdown', value: breakdown.join(' · ') });
+    }
+  }
+
+  // Purely local, not signed in, no models, no data at all — generic hint
+  if (!isCloud && !cloud.accountName && loadedCount === 0 && availableCount === 0 && !desktop?.totalMessages && !logStats) {
     lines.push({ type: 'badge', label: 'Hint', text: 'Local Ollama has no usage limits', color: '#a3a3a3' });
   }
 
