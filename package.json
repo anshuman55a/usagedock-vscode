@@ -66,6 +66,10 @@
         "command": "usagedock.openSettings",
         "title": "UsageDock: Open Settings",
         "icon": "$(gear)"
+      },
+      {
+        "command": "usagedock.cycleStatusBarProvider",
+        "title": "UsageDock: Switch Status Bar Provider"
       }
     ],
     "menus": {
@@ -106,6 +110,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show UsageDock status in the VS Code status bar."
+        },
+        "usagedock.statusBar.provider": {
+          "type": "string",
+          "default": "",
+          "description": "Provider ID to display in the status bar (e.g. cursor, claude, copilot). Leave empty to show the first connected provider."
         },
         "usagedock.ollama.url": {
           "type": "string",

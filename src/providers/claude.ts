@@ -66,7 +66,12 @@ export async function probeClaude(): Promise<{ plan?: string | null; lines: Metr
   }
 
   const raw = fs.readFileSync(credPath, 'utf-8');
-  const creds = JSON.parse(raw);
+  let creds: any;
+  try {
+    creds = JSON.parse(raw);
+  } catch {
+    throw new Error('Credentials file is corrupt. Run `claude` to re-authenticate.');
+  }
   const oauth = creds.claudeAiOauth;
   if (!oauth) {
     throw new Error('No OAuth credentials found. Run `claude` to authenticate.');

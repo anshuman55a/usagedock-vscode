@@ -9,12 +9,19 @@ import Database from 'better-sqlite3';
 // ── Helpers ───────────────────────────────────────────────────────
 
 function getOllamaBaseUrl(): string {
-  return (
-    vscode.workspace
-      .getConfiguration('usagedock')
-      .get<string>('ollama.url', 'http://localhost:11434')
-      .replace(/\/$/, '')
-  );
+  const raw = vscode.workspace
+    .getConfiguration('usagedock')
+    .get<string>('ollama.url', 'http://localhost:11434')
+    .replace(/\/$/, '');
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      throw new Error(`Unsupported scheme: ${u.protocol}`);
+    }
+    return raw;
+  } catch {
+    throw new Error(`Invalid Ollama URL: "${raw}". Check usagedock.ollama.url setting.`);
+  }
 }
 
 function getOllamaApiKey(): string {
@@ -324,6 +331,7 @@ interface DesktopStats {
   cachedPlan: string | null;
 }
 
+// IMPORTANT: `sql` must be a compile-time string literal — never pass user-controlled input.
 function queryCount(db: Database.Database, sql: string): number {
   try {
     const row = db.prepare(sql).get() as Record<string, number> | undefined;

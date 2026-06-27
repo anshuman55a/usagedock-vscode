@@ -13,7 +13,10 @@ function capitalize(s: string): string {
 function loadAuth(): any {
   for (const p of getCodexAuthPaths()) {
     if (fs.existsSync(p)) {
-      const auth = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      let auth: any;
+      try {
+        auth = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      } catch { continue; }
       if (auth?.tokens?.access_token) { return auth; }
     }
   }

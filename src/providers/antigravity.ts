@@ -251,6 +251,10 @@ function discoverWindowsLs(): LsDiscovery | null {
       if (!csrf || !extPortStr) {
         continue;
       }
+      // Validate CSRF token is a reasonable alphanumeric string
+      if (!/^[A-Za-z0-9_\-]{8,128}$/.test(csrf)) {
+        continue;
+      }
 
       const extensionPort = Number(extPortStr);
       if (!Number.isInteger(extensionPort) || extensionPort <= 0 || extensionPort >= 65536) {
@@ -307,6 +311,10 @@ function discoverUnixLs(): LsDiscovery | null {
       if (!csrf || !extPortStr) {
         continue;
       }
+      // Validate CSRF token is a reasonable alphanumeric string
+      if (!/^[A-Za-z0-9_\-]{8,128}$/.test(csrf)) {
+        continue;
+      }
       const extensionPort = Number(extPortStr);
       if (!Number.isInteger(extensionPort) || extensionPort <= 0 || extensionPort >= 65536) {
         continue;
@@ -330,6 +338,10 @@ function findPowershell(): string | null {
     }
     for (const sub of ['System32', 'Sysnative']) {
       const candidate = `${root}\\${sub}\\WindowsPowerShell\\v1.0\\powershell.exe`;
+      // Verify the resolved path matches the expected Windows PowerShell location pattern
+      if (!/\\WindowsPowerShell\\v1\.0\\powershell\.exe$/i.test(candidate)) {
+        continue;
+      }
       if (fs.existsSync(candidate)) {
         return candidate;
       }
@@ -376,7 +388,8 @@ function requestLocalJson(
           ...headers,
           'Content-Length': Buffer.byteLength(bodyText).toString(),
         },
-        rejectUnauthorized: false,
+        // Only skip cert check on plain HTTP (no TLS involved); on HTTPS let Node verify
+        rejectUnauthorized: parsed.protocol !== 'https:',
         timeout: timeoutMs,
       },
       (res) => {
@@ -525,6 +538,7 @@ async function probeLs(): Promise<{ plan?: string | null; lines: MetricLine[] } 
     return null;
   }
 
+
   const lines = buildModelLines(
     configs
       .map((config: any) => ({
@@ -629,6 +643,7 @@ function buildModelLines(configs: ModelConfig[]): MetricLine[] {
       };
     });
 }
+
 
 // ---------------------------------------------------------------------------
 // Cloud Code API (token-based fallback when LS is not running)

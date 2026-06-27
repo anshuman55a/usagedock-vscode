@@ -1,13 +1,14 @@
 import * as vscode from 'vscode';
 import type { ProviderResult } from './providers/types';
 import { probeAll, probeSingle } from './providers/engine';
-import { createStatusBar, updateStatusBar, disposeStatusBar } from './views/statusBar';
+import { createStatusBar, updateStatusBar, disposeStatusBar, cycleProvider } from './views/statusBar';
 import { UsageDockWebviewProvider } from './views/webviewPanel';
 
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
 let latestResults: ProviderResult[] = [];
 let webviewProvider: UsageDockWebviewProvider | null = null;
 let refreshInFlight: Promise<void> | null = null;
+const KNOWN_PROVIDER_IDS = new Set(['cursor', 'claude', 'copilot', 'codex', 'windsurf', 'antigravity', 'ollama']);
 
 export function activate(context: vscode.ExtensionContext) {
   // Status bar
@@ -29,13 +30,16 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand('usagedock.openSettings', () => {
       vscode.commands.executeCommand('workbench.action.openSettings', 'UsageDock');
     }),
+    vscode.commands.registerCommand('usagedock.cycleStatusBarProvider', () => {
+      cycleProvider();
+    }),
   );
 
   // Listen for webview messages
   webviewProvider.onMessage((msg) => {
     if (msg.type === 'refreshAll') {
       refreshAll();
-    } else if (msg.type === 'refreshSingle' && msg.id) {
+    } else if (msg.type === 'refreshSingle' && typeof msg.id === 'string' && KNOWN_PROVIDER_IDS.has(msg.id)) {
       refreshSingleProvider(msg.id);
     } else if (msg.type === 'ready') {
       if (latestResults.length > 0) {
@@ -61,7 +65,10 @@ export function activate(context: vscode.ExtensionContext) {
       ) {
         setupAutoRefresh();
       }
-      if (e.affectsConfiguration('usagedock.statusBar.enabled')) {
+      if (
+        e.affectsConfiguration('usagedock.statusBar.enabled') ||
+        e.affectsConfiguration('usagedock.statusBar.provider')
+      ) {
         updateStatusBar(latestResults);
       }
     }),

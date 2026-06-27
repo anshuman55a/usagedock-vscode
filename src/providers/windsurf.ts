@@ -30,6 +30,8 @@ function parseLsArgs(text: string): { port: number; csrf: string } | null {
   const port = extractFlag(text, '--extension_server_port');
   const csrf = extractFlag(text, '--csrf_token');
   if (!port || !csrf) { return null; }
+  // Validate CSRF token is a reasonable alphanumeric string
+  if (!/^[A-Za-z0-9_\-]{8,128}$/.test(csrf)) { return null; }
   const portNum = parseInt(port, 10);
   return isNaN(portNum) ? null : { port: portNum, csrf };
 }
@@ -96,6 +98,8 @@ function findPowershell(): string | null {
     if (!root) { continue; }
     for (const sub of ['System32', 'Sysnative']) {
       const p = `${root}\\${sub}\\WindowsPowerShell\\v1.0\\powershell.exe`;
+      // Verify the resolved path matches the expected Windows PowerShell location pattern
+      if (!/\\WindowsPowerShell\\v1\.0\\powershell\.exe$/i.test(p)) { continue; }
       if (fs.existsSync(p)) { return p; }
     }
   }
