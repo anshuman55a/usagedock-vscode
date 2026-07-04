@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type CSSProperties } from 'react';
+import { useState, useEffect, useCallback, useRef, type CSSProperties } from 'react';
 import { getVsCodeApi } from './vscode';
 import { PROVIDER_ICONS } from './ProviderIcons';
 
@@ -32,6 +32,14 @@ function getProgressColor(pct: number): string {
   return '#ef4444';
 }
 
+function getDotColor(provider: ProviderResult): string {
+  if (provider.error) return '#555';
+  const prog = provider.lines.find((l) => l.type === 'progress');
+  if (!prog || prog.type !== 'progress') return '#555';
+  const pct = prog.limit > 0 ? Math.min((prog.used / prog.limit) * 100, 100) : 0;
+  return getProgressColor(pct);
+}
+
 function timeUntilReset(isoStr: string): string {
   const trimmed = isoStr.trim();
   const numericReset = /^\d+$/.test(trimmed) ? Number(trimmed) : null;
@@ -52,6 +60,14 @@ function getSharedResetLabel(lines: MetricLine[]): string | null {
   if (resetValues.length === 0) return null;
   const unique = [...new Set(resetValues)];
   return unique.length === 1 ? timeUntilReset(unique[0]) : null;
+}
+
+function timeAgo(ms: number): string {
+  const diff = Date.now() - ms;
+  if (diff < 5000) return 'just now';
+  if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`;
+  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+  return `${Math.floor(diff / 3600000)}h ago`;
 }
 
 /* ─── Metric components ─── */
@@ -136,19 +152,48 @@ function BoltIcon({ className }: { className?: string }) {
   );
 }
 
+/* ─── Inline single metric (displayed in header row) ─── */
+
+function InlineMetric({ line }: { line: ProgressLine }) {
+  const pct = line.limit > 0 ? Math.min((line.used / line.limit) * 100, 100) : 0;
+  const color = getProgressColor(pct);
+  return (
+    <div className="inline-metric">
+      <span className="inline-metric-value" style={{ color }}>{formatValue(line.used, line.limit, line.format)}</span>
+      <div className="inline-metric-bar">
+        <div className="inline-metric-fill" style={{ width: `${pct}%`, background: color }} />
+      </div>
+    </div>
+  );
+}
+
 /* ─── Provider Card ─── */
 
-function ProviderCard({ provider, onRefresh, isRefreshing }: { provider: ProviderResult; onRefresh: () => void; isRefreshing: boolean }) {
+function ProviderCard({ provider, onRefresh, isRefreshing, compact }: { provider: ProviderResult; onRefresh: () => void; isRefreshing: boolean; compact?: boolean }) {
   const style = PROVIDER_STYLES[provider.id] || { bg: '#666' };
   const IconComponent = PROVIDER_ICONS[provider.id];
   const accent = provider.brandColor || style.bg;
-  const progressLineCount = provider.lines.filter((l) => l.type === 'progress').length;
+  const progressLines = provider.lines.filter((l): l is ProgressLine => l.type === 'progress');
+  const isSingleMetric = progressLines.length === 1 && provider.lines.length === 1;
   const sharedResetLabel = provider.error ? null : getSharedResetLabel(provider.lines);
-  const caption = provider.error ? 'Connection needs attention' : isRefreshing ? 'Refreshing usage...' : sharedResetLabel ? sharedResetLabel : provider.lines.length === 0 ? 'Waiting for usage signals' : null;
+  const caption = provider.error
+    ? (compact ? null : 'Connection needs attention')
+    : isRefreshing ? 'Refreshing...'
+    : sharedResetLabel ? sharedResetLabel
+    : provider.lines.length === 0 ? 'Waiting for signals' : null;
+
+  const cardClasses = [
+    'provider-card',
+    provider.error ? 'provider-card-error' : '',
+    progressLines.length > 1 ? 'provider-card-dense-metrics' : '',
+    isSingleMetric && !provider.error ? 'provider-card-inline' : '',
+    compact && provider.error ? 'provider-card-compact-error' : '',
+  ].filter(Boolean).join(' ');
+
   const cardStyle = { '--provider-accent': accent, '--provider-accent-soft': `${accent}20` } as CSSProperties;
 
   return (
-    <div className={`provider-card ${provider.error ? 'provider-card-error' : ''} ${progressLineCount > 1 ? 'provider-card-dense-metrics' : ''}`} style={cardStyle}>
+    <div className={cardClasses} style={cardStyle}>
       <div className="provider-card-header">
         <div className="provider-info">
           <div className="provider-icon" style={{ background: style.bg }}>
@@ -159,19 +204,29 @@ function ProviderCard({ provider, onRefresh, isRefreshing }: { provider: Provide
               <div className="provider-name">{provider.name}</div>
               {provider.plan && <div className="provider-plan">{provider.plan}</div>}
             </div>
-            {caption && <div className="provider-caption">{caption}</div>}
+            {compact && provider.error && (
+              <span className="compact-error-hint" title={provider.error}>{provider.error}</span>
+            )}
+            {caption && !compact && <div className="provider-caption">{caption}</div>}
+            {!compact && !provider.error && !caption && null}
           </div>
         </div>
+
+        {/* Inline single metric */}
+        {isSingleMetric && !provider.error && !isRefreshing && (
+          <InlineMetric line={progressLines[0]} />
+        )}
+
         <button className={`btn-icon provider-refresh ${isRefreshing ? 'spinning' : ''}`} onClick={onRefresh} title="Refresh" aria-label={`Refresh ${provider.name}`}>
           <RefreshIcon />
         </button>
       </div>
 
       {isRefreshing && (
-        <div className="provider-loading"><div className="skeleton" style={{ width: '100%', marginBottom: 6 }} /><div className="skeleton" style={{ width: '60%' }} /></div>
+        <div className="provider-loading"><div className="skeleton" style={{ width: '100%', marginBottom: 4 }} /><div className="skeleton" style={{ width: '60%' }} /></div>
       )}
 
-      {!isRefreshing && provider.error && (
+      {!isRefreshing && provider.error && !compact && (
         <div className="provider-error"><div className="error-msg"><AlertIcon /><span>{provider.error}</span></div></div>
       )}
 
@@ -191,6 +246,26 @@ function ProviderCard({ provider, onRefresh, isRefreshing }: { provider: Provide
   );
 }
 
+/* ─── Summary Dots ─── */
+
+function SummaryDots({ providers, onDotClick }: { providers: ProviderResult[]; onDotClick: (id: string) => void }) {
+  if (providers.length === 0) return null;
+  return (
+    <div className="summary-dots">
+      {providers.map((p) => (
+        <button
+          key={p.id}
+          className={`summary-dot ${!p.error && p.lines.length > 0 ? 'summary-dot-active' : ''}`}
+          style={{ background: getDotColor(p), color: getDotColor(p) }}
+          onClick={() => onDotClick(p.id)}
+          title={`${p.name}: ${p.error ? 'unavailable' : p.lines.filter((l) => l.type === 'progress').map((l) => l.type === 'progress' ? `${Math.round(l.used)}%` : '').join(', ') || 'connected'}`}
+          aria-label={p.name}
+        />
+      ))}
+    </div>
+  );
+}
+
 /* ─── Main App ─── */
 
 function App() {
@@ -198,20 +273,37 @@ function App() {
   const [refreshing, setRefreshing] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [showUnavailable, setShowUnavailable] = useState(false);
+  const [lastRefreshMs, setLastRefreshMs] = useState<number | null>(null);
+  const [, setTick] = useState(0);
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const availableProviders = providers.filter((p) => !p.error && p.lines.length > 0);
   const unavailableProviders = providers.filter((p) => p.error || p.lines.length === 0);
   const connectedCount = availableProviders.length;
-  const statusText = isLoading ? 'Refreshing local usage' : providers.length === 0 ? 'Waiting for connected tools' : `${connectedCount} of ${providers.length} providers reporting`;
+
+  const statusText = isLoading
+    ? 'Refreshing...'
+    : lastRefreshMs
+      ? `Updated ${timeAgo(lastRefreshMs)}`
+      : providers.length === 0
+        ? 'Waiting for data'
+        : `${connectedCount}/${providers.length} connected`;
 
   const refreshAll = useCallback(() => { vscode.postMessage({ type: 'refreshAll' }); }, []);
   const refreshSingle = useCallback((id: string) => { vscode.postMessage({ type: 'refreshSingle', id }); }, []);
   const openSettings = useCallback(() => { vscode.postMessage({ type: 'openSettings' }); }, []);
 
+  const scrollToProvider = useCallback((id: string) => {
+    cardRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, []);
+
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const msg = event.data;
-      if (msg.type === 'providerResults') { setProviders(msg.providers); }
+      if (msg.type === 'providerResults') {
+        setProviders(msg.providers);
+        setLastRefreshMs(Date.now());
+      }
       if (msg.type === 'loading') { setIsLoading(msg.loading); }
       if (msg.type === 'refreshing') {
         setRefreshing((prev) => {
@@ -226,11 +318,33 @@ function App() {
     return () => window.removeEventListener('message', handler);
   }, []);
 
+  // Update "Updated Xm ago" every 30s
+  useEffect(() => {
+    if (!lastRefreshMs) return;
+    const interval = setInterval(() => setTick((t) => t + 1), 30_000);
+    return () => clearInterval(interval);
+  }, [lastRefreshMs]);
+
+  // Auto-expand unavailable section when no providers are connected
   useEffect(() => {
     if (availableProviders.length === 0 && unavailableProviders.length > 0) {
       setShowUnavailable(true);
     }
   }, [availableProviders.length, unavailableProviders.length]);
+
+  // Keyboard shortcut: R to refresh
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'r' || e.key === 'R') {
+        const tag = (e.target as HTMLElement)?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+        e.preventDefault();
+        refreshAll();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [refreshAll]);
 
   return (
     <div className="app-shell">
@@ -251,8 +365,14 @@ function App() {
         </div>
       </div>
 
+      {providers.length > 0 && <SummaryDots providers={providers} onDotClick={scrollToProvider} />}
+
       <div className="provider-list">
-        {availableProviders.map((p) => <ProviderCard key={p.id} provider={p} onRefresh={() => refreshSingle(p.id)} isRefreshing={refreshing.has(p.id)} />)}
+        {availableProviders.map((p) => (
+          <div key={p.id} ref={(el) => { cardRefs.current[p.id] = el; }}>
+            <ProviderCard provider={p} onRefresh={() => refreshSingle(p.id)} isRefreshing={refreshing.has(p.id)} />
+          </div>
+        ))}
 
         {!isLoading && unavailableProviders.length > 0 && (
           <section className={`provider-collapse ${showUnavailable ? 'provider-collapse-open' : ''}`}>
@@ -268,16 +388,32 @@ function App() {
             </button>
             {showUnavailable && (
               <div className="provider-collapse-body">
-                {unavailableProviders.map((p) => <ProviderCard key={p.id} provider={p} onRefresh={() => refreshSingle(p.id)} isRefreshing={refreshing.has(p.id)} />)}
+                {unavailableProviders.map((p) => (
+                  <div key={p.id} ref={(el) => { cardRefs.current[p.id] = el; }}>
+                    <ProviderCard provider={p} onRefresh={() => refreshSingle(p.id)} isRefreshing={refreshing.has(p.id)} compact />
+                  </div>
+                ))}
               </div>
             )}
           </section>
         )}
 
         {!isLoading && providers.length === 0 && (
-          <div className="empty-state"><BoltIcon /><p>No usage loaded yet.<br />Use Refresh All, or enable refresh on open in UsageDock settings.</p></div>
+          <div className="empty-state">
+            <BoltIcon />
+            <p>No usage loaded yet.</p>
+            <button className="empty-cta" onClick={refreshAll}>
+              <RefreshIcon /> Refresh Now
+            </button>
+          </div>
         )}
       </div>
+
+      {providers.length > 0 && (
+        <div className="app-footer">
+          <span className="footer-hint">Press <kbd>R</kbd> to refresh</span>
+        </div>
+      )}
     </div>
   );
 }

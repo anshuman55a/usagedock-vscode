@@ -44,11 +44,11 @@ export function activate(context: vscode.ExtensionContext) {
     } else if (msg.type === 'ready') {
       if (latestResults.length > 0) {
         webviewProvider?.postMessage({ type: 'providerResults', providers: latestResults });
+        if (shouldRefreshOnOpen()) {
+          refreshAll();
+        }
       } else {
-        webviewProvider?.postMessage({ type: 'loading', loading: false });
-      }
-
-      if (shouldRefreshOnOpen()) {
+        // First open with no cached data — always refresh so the sidebar isn't empty
         refreshAll();
       }
     } else if (msg.type === 'openSettings') {

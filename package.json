@@ -104,7 +104,7 @@
         },
         "usagedock.refreshOnOpen": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Refresh provider usage when the UsageDock sidebar view opens."
         },
         "usagedock.statusBar.enabled": {

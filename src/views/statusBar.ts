@@ -74,11 +74,19 @@ function providerUsageSummary(p: ProviderResult): string {
 /**
  * Build the primary usage percentage string for a provider (status bar text).
  */
-function providerPct(p: ProviderResult): string | null {
-  const prog = p.lines.find((l) => l.type === 'progress');
-  if (!prog || prog.type !== 'progress') { return null; }
-  const pct = prog.limit > 0 ? Math.round((prog.used / prog.limit) * 100) : 0;
-  return `${pct}%`;
+function providerPct(p: ProviderResult): { label: string; pct: number } | null {
+  const progLines = p.lines.filter((l) => l.type === 'progress');
+  if (progLines.length === 0) { return null; }
+
+  let best: { label: string; pct: number } | null = null;
+  for (const l of progLines) {
+    if (l.type !== 'progress') { continue; }
+    const pct = l.limit > 0 ? Math.round((l.used / l.limit) * 100) : 0;
+    if (!best || pct > best.pct) {
+      best = { label: l.label, pct };
+    }
+  }
+  return best;
 }
 
 export function updateStatusBar(providers: ProviderResult[]) {
@@ -101,14 +109,23 @@ export function updateStatusBar(providers: ProviderResult[]) {
   // Selected provider
   const selectedId = getSelectedProviderId(providers);
   const selected = providers.find((p) => p.id === selectedId) ?? providers[0];
-  const pct = providerPct(selected);
+  const pctInfo = providerPct(selected);
 
   if (selected.error) {
     statusBarItem.text = `$(zap) ${selected.name} · N/A`;
-  } else if (pct) {
-    statusBarItem.text = `$(zap) ${selected.name} · ${pct}`;
+  } else if (pctInfo) {
+    statusBarItem.text = `$(zap) ${selected.name} · ${pctInfo.label} ${pctInfo.pct}%`;
   } else {
     statusBarItem.text = `$(zap) ${selected.name}`;
+  }
+
+  // Color-code based on displayed usage level
+  if (pctInfo && pctInfo.pct >= 90) {
+    statusBarItem.color = '#ef4444';
+  } else if (pctInfo && pctInfo.pct >= 50) {
+    statusBarItem.color = '#f59e0b';
+  } else {
+    statusBarItem.color = undefined;
   }
 
   // ── Rich Markdown tooltip ──
