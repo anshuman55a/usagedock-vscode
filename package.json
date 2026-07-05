@@ -1,7 +1,7 @@
 {
   "name": "usage-dock",
   "displayName": "Usage-Dock",
-  "description": "Track AI coding tool usage (Cursor, Claude, Copilot, Codex, Windsurf, Antigravity) without leaving VS Code.",
+  "description": "Track your AI usage across Cursor, Claude, Copilot, Codex, Windsurf, Antigravity, and Ollama — usage limits, quotas, and resets in one sidebar.",
   "version": "0.1.4",
   "publisher": "anshuman55a",
   "license": "MIT",
@@ -14,18 +14,36 @@
     "vscode": "^1.85.0"
   },
   "categories": [
+    "Programming Languages",
+    "Machine Learning",
     "Other"
   ],
   "keywords": [
     "ai",
     "usage",
+    "usage tracker",
+    "quota",
+    "limit",
+    "rate limit",
     "cursor",
     "claude",
     "copilot",
     "codex",
     "windsurf",
+    "antigravity",
+    "gemini",
+    "ollama",
     "tracking",
-    "monitor"
+    "monitor",
+    "ai usage",
+    "llm",
+    "openai",
+    "anthropic",
+    "deepseek",
+    "token",
+    "usagedock",
+    "productivity",
+    "assistant"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -70,18 +88,10 @@
       },
       {
         "command": "usagedock.cycleStatusBarProvider",
-        "title": "UsageDock: Switch Status Bar Provider"
+        "title": "UsageDock: Select Status Bar Provider"
       }
     ],
-    "menus": {
-      "view/title": [
-        {
-          "command": "usagedock.refreshAll",
-          "when": "view == usagedock.panel",
-          "group": "navigation"
-        }
-      ]
-    },
+    "menus": {},
     "configuration": {
       "title": "UsageDock",
       "properties": {
