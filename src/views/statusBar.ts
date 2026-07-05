@@ -36,20 +36,56 @@ function getSelectedProviderId(providers: ProviderResult[]): string {
 }
 
 /**
- * Cycles to the next provider and persists the choice.
+ * Shows a quick-pick dropdown so the user can choose which provider to display
+ * in the status bar.
  */
-export function cycleProvider() {
-  if (cachedProviders.length === 0) { return; }
+export async function cycleProvider() {
+  if (cachedProviders.length === 0) {
+    vscode.window.showInformationMessage('UsageDock: No providers loaded yet. Refresh first.');
+    return;
+  }
 
   const currentId = getSelectedProviderId(cachedProviders);
-  const currentIdx = cachedProviders.findIndex((p) => p.id === currentId);
-  const nextIdx = (currentIdx + 1) % cachedProviders.length;
-  const nextId = cachedProviders[nextIdx].id;
+
+  const items: vscode.QuickPickItem[] = cachedProviders.map((p) => {
+    const isCurrent = p.id === currentId;
+    let detail: string;
+
+    if (p.error) {
+      detail = `$(warning) ${p.error.slice(0, 80)}`;
+    } else {
+      const progLines = p.lines.filter((l) => l.type === 'progress');
+      if (progLines.length > 0) {
+        detail = progLines
+          .map((l) => {
+            if (l.type !== 'progress') { return ''; }
+            const pct = l.limit > 0 ? Math.round((l.used / l.limit) * 100) : 0;
+            return `${l.label} ${pct}%`;
+          })
+          .join(' · ');
+      } else {
+        detail = '$(check) Connected';
+      }
+    }
+
+    return {
+      label: `${isCurrent ? '$(check) ' : '     '}${p.name}`,
+      description: p.plan ?? '',
+      detail,
+      providerId: p.id,
+    } as vscode.QuickPickItem & { providerId: string };
+  });
+
+  const picked = await vscode.window.showQuickPick(items, {
+    placeHolder: 'Select a provider for the status bar',
+    title: 'UsageDock — Status Bar Provider',
+  }) as (vscode.QuickPickItem & { providerId: string }) | undefined;
+
+  if (!picked) { return; }
 
   const config = vscode.workspace.getConfiguration('usagedock');
-  config.update('statusBar.provider', nextId, vscode.ConfigurationTarget.Global);
+  await config.update('statusBar.provider', picked.providerId, vscode.ConfigurationTarget.Global);
 
-  // Re-render immediately
   updateStatusBar(cachedProviders);
 }
 
@@ -169,7 +205,7 @@ export function updateStatusBar(providers: ProviderResult[]) {
     md.appendMarkdown('---\n\n');
   }
 
-  md.appendMarkdown('*Click to switch provider*');
+  md.appendMarkdown('*Click to select provider*');
 
   statusBarItem.tooltip = md;
   statusBarItem.show();
