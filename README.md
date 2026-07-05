@@ -11,9 +11,9 @@ No UsageDock account. No hosted dashboard. No provider credentials sent to a Usa
 - **Editor-native usage glance**: Check AI coding limits from the VS Code Activity Bar.
 - **Local-first by design**: UsageDock reads local provider state on your machine.
 - **Multi-provider view**: Cursor, Claude, Copilot, Codex, and Windsurf in one place.
-- **Manual-first refresh**: Usage does not refresh on open by default. You control when scans run.
-- **Configurable auto refresh**: Enable periodic refresh only if you want it.
-- **Status bar signal**: See connected provider count and a headline usage metric at a glance.
+- **Refresh on open by default**: Usage refreshes automatically when you open the sidebar so you always see current data.
+- **Press 'R' to refresh**: Quick keyboard shortcut to manually refresh all providers when the sidebar is focused.
+- **Status bar dropdown**: Click the status bar summary to select which provider is displayed, and see visual alerts (amber/red) when usage is high.
 
 ## Supported Providers
 
@@ -53,18 +53,18 @@ Provider APIs may still receive requests required to fetch your usage, using the
 To install from a local VSIX:
 
 ```powershell
-code --install-extension usagedock-0.1.0.vsix
+code --install-extension usage-dock-0.1.5.vsix
 ```
 
 ## Settings
 
-UsageDock intentionally does not refresh on open by default. You can change that from VS Code settings.
+UsageDock refreshes on open by default to keep the sidebar updated. You can customize this from VS Code settings.
 
 ```jsonc
 {
   "usagedock.autoRefresh.enabled": false,
   "usagedock.autoRefresh.intervalMinutes": 15,
-  "usagedock.refreshOnOpen": false,
+  "usagedock.refreshOnOpen": true,
   "usagedock.statusBar.enabled": true,
   "usagedock.antigravity.enabled": true,
   "usagedock.ollama.url": "http://localhost:11434",
@@ -76,7 +76,7 @@ UsageDock intentionally does not refresh on open by default. You can change that
 |---|---:|---|
 | `usagedock.autoRefresh.enabled` | `false` | Refresh usage on a timer. |
 | `usagedock.autoRefresh.intervalMinutes` | `15` | Auto-refresh interval. Supported values: `5`, `10`, `15`, `30`, `60`. |
-| `usagedock.refreshOnOpen` | `false` | Refresh when the UsageDock sidebar view opens. |
+| `usagedock.refreshOnOpen` | `true` | Refresh when the UsageDock sidebar view opens. |
 | `usagedock.statusBar.enabled` | `true` | Show UsageDock in the VS Code status bar. |
 | `usagedock.antigravity.enabled` | `true` | Show Antigravity model quota tracking. |
 | `usagedock.ollama.url` | `http://localhost:11434` | Ollama server URL. Use a remote URL for cloud-hosted Ollama. |

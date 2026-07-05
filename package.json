@@ -2,7 +2,7 @@
   "name": "usage-dock",
   "displayName": "Usage-Dock",
   "description": "Track your AI usage across Cursor, Claude, Copilot, Codex, Windsurf, Antigravity, and Ollama — usage limits, quotas, and resets in one sidebar.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "anshuman55a",
   "license": "MIT",
   "repository": {

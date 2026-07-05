@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.1.5
+
+### UI Improvements
+- Compact sidebar card layout: reduced provider icons to 24px, card padding to 8px, tighter margins throughout.
+- Summary dots bar: colored dots above the card list give an at-a-glance usage health overview; clicking a dot scrolls to that provider's card.
+- Single-metric providers now render their metric inline in the card header row, saving vertical space.
+- Last-refreshed timestamp replaces the static status text ("Updated 2m ago"), updated every 30 seconds.
+- Empty state now shows a "Refresh Now" CTA button instead of text-only instructions.
+- Footer keyboard hint ("Press R to refresh") shown when providers are loaded.
+- Compact error cards for unavailable providers now show the full error message (no truncation).
+
+### Interactions
+- Pressing `R` while the sidebar is focused refreshes all providers.
+- Sidebar auto-refreshes on first open when no cached data is available (never shows empty on first use).
+- `refreshOnOpen` setting now defaults to `true`.
+
+### Visual Polish
+- Progress bar shimmer animation plays once on load, not infinitely.
+- Progress bar track height increased to 5px for better readability.
+
+### Status Bar
+- Status bar now shows the highest-usage metric for the selected provider (e.g. "Antigravity · Claude 60%").
+- Status bar color reflects usage level: amber ≥50%, red ≥90%.
+- Clicking the status bar item now opens a **quick-pick dropdown** to select which provider to display — replaces the blind cycle-through behavior.
+- Removed the duplicate native refresh button from the sidebar title bar (webview refresh + R shortcut are sufficient).
+
+### Ollama
+- When an Ollama API key is set, the extension also queries the cloud `https://ollama.com/api/me` endpoint for richer account data (PascalCase fields: Plan, Name, Email).
+
+### Marketplace & Release
+- Improved discoverability: description updated, `categories` expanded, keywords reordered with highest-impact terms first.
+- Added `.github/workflows/release.yml` for automated build + publish to VS Code Marketplace, Open VSX, and GitHub Releases on version tag push.
+
+
 ## 0.1.4
 
 - Enhanced Ollama tracking: added cloud account usage from `/api/me` endpoint, showing session usage and weekly usage as progress bars when signed into an Ollama account.
