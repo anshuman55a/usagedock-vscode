@@ -117,6 +117,21 @@
           "default": true,
           "description": "Refresh provider usage when the UsageDock sidebar view opens."
         },
+        "usagedock.theme": {
+          "type": "string",
+          "default": "dark",
+          "enum": [
+            "dark",
+            "light",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "Always use the dark UsageDock look.",
+            "Always use the light UsageDock look.",
+            "Follow the active VS Code color theme."
+          ],
+          "description": "Color theme for the UsageDock sidebar panel."
+        },
         "usagedock.statusBar.enabled": {
           "type": "boolean",
           "default": true,

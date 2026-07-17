@@ -9,6 +9,12 @@ let latestResults: ProviderResult[] = [];
 let webviewProvider: UsageDockWebviewProvider | null = null;
 let refreshInFlight: Promise<void> | null = null;
 const KNOWN_PROVIDER_IDS = new Set(['cursor', 'claude', 'copilot', 'codex', 'windsurf', 'antigravity', 'ollama']);
+const THEME_VALUES = new Set(['dark', 'light', 'auto']);
+
+function getConfiguredTheme(): string {
+  const theme = vscode.workspace.getConfiguration('usagedock').get<string>('theme', 'dark');
+  return THEME_VALUES.has(theme) ? theme : 'dark';
+}
 
 export function activate(context: vscode.ExtensionContext) {
   // Status bar
@@ -42,6 +48,7 @@ export function activate(context: vscode.ExtensionContext) {
     } else if (msg.type === 'refreshSingle' && typeof msg.id === 'string' && KNOWN_PROVIDER_IDS.has(msg.id)) {
       refreshSingleProvider(msg.id);
     } else if (msg.type === 'ready') {
+      webviewProvider?.postMessage({ type: 'theme', theme: getConfiguredTheme() });
       if (latestResults.length > 0) {
         webviewProvider?.postMessage({ type: 'providerResults', providers: latestResults });
         if (shouldRefreshOnOpen()) {
@@ -53,6 +60,10 @@ export function activate(context: vscode.ExtensionContext) {
       }
     } else if (msg.type === 'openSettings') {
       vscode.commands.executeCommand('usagedock.openSettings');
+    } else if (msg.type === 'setTheme' && typeof msg.theme === 'string' && THEME_VALUES.has(msg.theme)) {
+      vscode.workspace
+        .getConfiguration('usagedock')
+        .update('theme', msg.theme, vscode.ConfigurationTarget.Global);
     }
   });
 
@@ -70,6 +81,9 @@ export function activate(context: vscode.ExtensionContext) {
         e.affectsConfiguration('usagedock.statusBar.provider')
       ) {
         updateStatusBar(latestResults);
+      }
+      if (e.affectsConfiguration('usagedock.theme')) {
+        webviewProvider?.postMessage({ type: 'theme', theme: getConfiguredTheme() });
       }
     }),
   );

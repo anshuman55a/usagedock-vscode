@@ -12,6 +12,15 @@ interface BadgeLine { type: 'badge'; label: string; text: string; color?: string
 type MetricLine = ProgressLine | TextLine | BadgeLine;
 interface ProviderResult { id: string; name: string; icon: string; brandColor: string; plan?: string | null; lines: MetricLine[]; error?: string | null; }
 
+type ThemeChoice = 'dark' | 'light' | 'auto';
+const THEME_ORDER: ThemeChoice[] = ['dark', 'light', 'auto'];
+const THEME_LABELS: Record<ThemeChoice, string> = { dark: 'Dark', light: 'Light', auto: 'Auto (VS Code)' };
+
+function isVsCodeLight(): boolean {
+  const kind = document.body.getAttribute('data-vscode-theme-kind') || document.body.className;
+  return kind.includes('light');
+}
+
 const PROVIDER_STYLES: Record<string, { bg: string }> = {
   cursor: { bg: '#000000' }, claude: { bg: '#D97757' }, copilot: { bg: '#000000' }, codex: { bg: '#000000' }, windsurf: { bg: '#00B4D8' }, antigravity: { bg: '#6D5DF6' }, ollama: { bg: '#1a1a1a' },
 };
@@ -152,6 +161,35 @@ function BoltIcon({ className }: { className?: string }) {
   );
 }
 
+function MoonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+    </svg>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="4" />
+      <line x1="12" y1="2" x2="12" y2="4" /><line x1="12" y1="20" x2="12" y2="22" />
+      <line x1="4.93" y1="4.93" x2="6.34" y2="6.34" /><line x1="17.66" y1="17.66" x2="19.07" y2="19.07" />
+      <line x1="2" y1="12" x2="4" y2="12" /><line x1="20" y1="12" x2="22" y2="12" />
+      <line x1="4.93" y1="19.07" x2="6.34" y2="17.66" /><line x1="17.66" y1="6.34" x2="19.07" y2="4.93" />
+    </svg>
+  );
+}
+
+function AutoThemeIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="4" width="20" height="14" rx="2" />
+      <line x1="8" y1="21" x2="16" y2="21" /><line x1="12" y1="18" x2="12" y2="21" />
+    </svg>
+  );
+}
+
 /* ─── Inline single metric (displayed in header row) ─── */
 
 function InlineMetric({ line }: { line: ProgressLine }) {
@@ -274,8 +312,12 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [showUnavailable, setShowUnavailable] = useState(false);
   const [lastRefreshMs, setLastRefreshMs] = useState<number | null>(null);
+  const [theme, setTheme] = useState<ThemeChoice>('dark');
+  const [vsCodeLight, setVsCodeLight] = useState(() => isVsCodeLight());
   const [, setTick] = useState(0);
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  const resolvedTheme: 'dark' | 'light' = theme === 'auto' ? (vsCodeLight ? 'light' : 'dark') : theme;
 
   const availableProviders = providers.filter((p) => !p.error && p.lines.length > 0);
   const unavailableProviders = providers.filter((p) => p.error || p.lines.length === 0);
@@ -297,6 +339,21 @@ function App() {
     cardRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, []);
 
+  const cycleTheme = useCallback(() => {
+    setTheme((prev) => {
+      const next = THEME_ORDER[(THEME_ORDER.indexOf(prev) + 1) % THEME_ORDER.length];
+      vscode.postMessage({ type: 'setTheme', theme: next });
+      return next;
+    });
+  }, []);
+
+  // Track VS Code theme kind changes (relevant in "auto" mode)
+  useEffect(() => {
+    const observer = new MutationObserver(() => setVsCodeLight(isVsCodeLight()));
+    observer.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-vscode-theme-kind'] });
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const msg = event.data;
@@ -305,6 +362,7 @@ function App() {
         setLastRefreshMs(Date.now());
       }
       if (msg.type === 'loading') { setIsLoading(msg.loading); }
+      if (msg.type === 'theme' && THEME_ORDER.includes(msg.theme)) { setTheme(msg.theme); }
       if (msg.type === 'refreshing') {
         setRefreshing((prev) => {
           const next = new Set(prev);
@@ -347,7 +405,7 @@ function App() {
   }, [refreshAll]);
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={resolvedTheme}>
       <div className="header">
         <div className="header-mark"><BoltIcon /></div>
         <span className="header-product">UsageDock</span>
@@ -356,6 +414,14 @@ function App() {
           <span>{statusText}</span>
         </div>
         <div className="header-actions">
+          <button
+            className="btn-icon theme-toggle"
+            onClick={cycleTheme}
+            title={`Theme: ${THEME_LABELS[theme]} — click to change`}
+            aria-label={`Theme: ${THEME_LABELS[theme]}. Click to switch.`}
+          >
+            {theme === 'auto' ? <AutoThemeIcon /> : theme === 'light' ? <SunIcon /> : <MoonIcon />}
+          </button>
           <button className="btn-icon settings-button" onClick={openSettings} title="Open UsageDock settings" aria-label="Open UsageDock settings">
             <SettingsIcon />
           </button>
