@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.6
+
+### Color Theme Support
+- Added configurable color theme for the sidebar panel: **Dark**, **Light**, or **Auto** (follows VS Code theme).
+- New theme toggle button in the header cycles through Dark → Light → Auto.
+- Light theme with warm neutral tones designed for light VS Code themes.
+- Auto mode detects VS Code's active color theme kind and switches automatically.
+- Theme preference persists via the `usagedock.theme` setting (default: `dark`).
+- Changing the setting from VS Code Settings or the toggle button syncs instantly.
+
 ## 0.1.5
 
 ### UI Improvements
