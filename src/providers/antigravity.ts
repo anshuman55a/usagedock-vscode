@@ -1,7 +1,9 @@
 import * as fs from 'fs';
 import * as http from 'http';
 import * as https from 'https';
-import { execSync } from 'child_process';
+import * as os from 'os';
+import * as path from 'path';
+import { execFile, execFileSync, execSync } from 'child_process';
 import * as vscode from 'vscode';
 import type { MetricLine } from './types';
 import { getAntigravityDbPath } from '../util/platform';
@@ -52,7 +54,7 @@ interface ModelConfig {
   modelId?: string | null;
 }
 
-let cachedAccessToken: { token: string; expiresAtMs: number } | null = null;
+let cachedAccessToken: { token: string; expiresAtMs: number; refreshToken: string } | null = null;
 
 // ---------------------------------------------------------------------------
 // Protobuf wire-format decoder (operates on binary strings, matching plugin.js)
@@ -195,6 +197,98 @@ function loadOAuthTokens(dbPath: string): OAuthTokens | null {
 }
 
 // ---------------------------------------------------------------------------
+// Windows AGY CLI credentials — read-only fallback when the IDE has no tokens.
+// ---------------------------------------------------------------------------
+
+const WINDOWS_CREDENTIAL_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class UsageDockCredentialReader {
+    [DllImport("Advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool CredRead(string target, int type, int flags, out IntPtr credential);
+    [DllImport("Advapi32.dll")]
+    public static extern void CredFree(IntPtr credential);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct Credential {
+        public int Flags;
+        public int Type;
+        public string TargetName;
+        public string Comment;
+        public long LastWritten;
+        public int CredentialBlobSize;
+        public IntPtr CredentialBlob;
+        public int Persist;
+        public int AttributeCount;
+        public IntPtr Attributes;
+        public string TargetAlias;
+        public string UserName;
+    }
+    public static string Read() {
+        IntPtr pointer;
+        if (!CredRead("gemini:antigravity", 1, 0, out pointer)) return "";
+        try {
+            var credential = (Credential)Marshal.PtrToStructure(pointer, typeof(Credential));
+            byte[] bytes = new byte[credential.CredentialBlobSize];
+            Marshal.Copy(credential.CredentialBlob, bytes, 0, bytes.Length);
+            return System.Text.Encoding.UTF8.GetString(bytes);
+        } finally {
+            CredFree(pointer);
+        }
+    }
+}
+"@
+[UsageDockCredentialReader]::Read()
+`.trim();
+
+function loadWindowsCliTokens(): OAuthTokens | null {
+  const psPath = findPowershell();
+  if (!psPath) {
+    return null;
+  }
+
+  try {
+    const raw = execFileSync(
+      psPath,
+      ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_CREDENTIAL_SCRIPT],
+      { windowsHide: true, encoding: 'utf8', timeout: 5_000 },
+    ).trim();
+    const data = JSON.parse(raw);
+    if (data?.auth_method !== 'oauth' && data?.auth_method !== 'consumer') {
+      return null;
+    }
+    const accessToken = data.token?.access_token || null;
+    const refreshToken = data.token?.refresh_token || null;
+    const expiryMs = data.token?.expiry ? Date.parse(data.token.expiry) : NaN;
+    const expirySeconds = !isNaN(expiryMs) ? Math.floor(expiryMs / 1000) : null;
+    return accessToken || refreshToken ? { accessToken, refreshToken, expirySeconds } : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CLI owns token renewal and credential persistence; UsageDock only reads the result.
+async function renewWindowsCliTokens(): Promise<OAuthTokens | null> {
+  const localAppData = process.env.LOCALAPPDATA;
+  const installedPath = localAppData ? path.join(localAppData, 'agy', 'bin', 'agy.exe') : null;
+  const executable = installedPath && fs.existsSync(installedPath) ? installedPath : 'agy.exe';
+  const succeeded = await new Promise<boolean>((resolve) => {
+    const child = execFile(executable, ['models'], {
+      cwd: os.tmpdir(),
+      windowsHide: true,
+      timeout: 20_000,
+      maxBuffer: 64 * 1024,
+    }, (error) => resolve(!error));
+    // A quota check must not wait for terminal input. Never log CLI output or errors.
+    child.stdin?.end();
+  });
+  return succeeded ? loadWindowsCliTokens() : null;
+}
+
+// ---------------------------------------------------------------------------
 // LS discovery — find Antigravity language server processes on Windows/Linux.
 //
 // Key insight: the Antigravity LS exposes TWO servers on separate ports:
@@ -234,7 +328,7 @@ function discoverWindowsLs(): LsDiscovery | null {
 
   try {
     const script = `& { $procs = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*language_server*' -and $_.CommandLine -like '*antigravity*' } | Select-Object ProcessId, CommandLine); if ($procs.Count -eq 0) { '[]' } else { $procs | ConvertTo-Json -Compress } }`;
-    const raw = execSync(`"${psPath}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${script.replace(/"/g, '\\"')}"`, {
+    const raw = execSync(`"${psPath}" -NoProfile -NonInteractive -Command "${script.replace(/"/g, '\\"')}"`, {
       windowsHide: true,
       encoding: 'utf8',
       timeout: 15_000,
@@ -269,7 +363,7 @@ function discoverWindowsLs(): LsDiscovery | null {
       if (pid != null) {
         try {
           const portScript = `& { $ports = @(Get-NetTCPConnection -OwningProcess ${pid} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort); if ($ports.Count -eq 0) { '[]' } else { $ports | ConvertTo-Json -Compress } }`;
-          const portsRaw = execSync(`"${psPath}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${portScript.replace(/"/g, '\\"')}"`, {
+          const portsRaw = execSync(`"${psPath}" -NoProfile -NonInteractive -Command "${portScript.replace(/"/g, '\\"')}"`, {
             windowsHide: true,
             encoding: 'utf8',
             timeout: 10_000,
@@ -688,6 +782,7 @@ async function refreshAccessToken(refreshToken: string): Promise<string | null> 
     cachedAccessToken = {
       token: data.access_token,
       expiresAtMs: Date.now() + expiresIn * 1000,
+      refreshToken,
     };
     return data.access_token;
   } catch {
@@ -695,12 +790,12 @@ async function refreshAccessToken(refreshToken: string): Promise<string | null> 
   }
 }
 
-function loadCachedToken(): string | null {
+function loadCachedToken(refreshToken: string | null): string | null {
   if (!cachedAccessToken || cachedAccessToken.expiresAtMs <= Date.now()) {
     cachedAccessToken = null;
     return null;
   }
-  return cachedAccessToken.token;
+  return cachedAccessToken.refreshToken === refreshToken ? cachedAccessToken.token : null;
 }
 
 async function probeCloudCode(token: string): Promise<any | null | { _authFailed: true }> {
@@ -770,33 +865,36 @@ export async function probeAntigravity(): Promise<{ plan?: string | null; lines:
     throw new Error('Enable Antigravity quota tracking in UsageDock settings.');
   }
 
-  const dbPath = getAntigravityDbPath();
-  const dbTokens = dbPath && fs.existsSync(dbPath) ? loadOAuthTokens(dbPath) : null;
-
   // --- Strategy 1: LS probe (returns model data directly, no token needed) ---
   const lsResult = await probeLs();
   if (lsResult) {
     return lsResult;
   }
 
-  // --- Strategy 2: Cloud Code API with tokens from the DB ---
-  if (!dbPath || !fs.existsSync(dbPath)) {
+  // --- Strategy 2: Cloud Code API with IDE tokens or Windows CLI credentials ---
+  const dbPath = getAntigravityDbPath();
+  const dbTokens = dbPath && fs.existsSync(dbPath) ? loadOAuthTokens(dbPath) : null;
+  const usingCli = !dbTokens && process.platform === 'win32';
+  const oauthTokens = dbTokens ?? (usingCli ? loadWindowsCliTokens() : null);
+  if (!oauthTokens) {
     throw new Error('Antigravity not installed or not signed in.');
   }
 
   const tokens: string[] = [];
   const nowSeconds = Math.floor(Date.now() / 1000);
-  if (dbTokens?.accessToken && (!dbTokens.expirySeconds || dbTokens.expirySeconds > nowSeconds)) {
-    tokens.push(dbTokens.accessToken);
+  if (oauthTokens.accessToken && (oauthTokens.expirySeconds === null || oauthTokens.expirySeconds > nowSeconds)) {
+    tokens.push(oauthTokens.accessToken);
   }
 
-  const cached = loadCachedToken();
+  const cached = loadCachedToken(oauthTokens.refreshToken);
   if (cached && !tokens.includes(cached)) {
     tokens.push(cached);
   }
 
-  if (tokens.length === 0 && !dbTokens?.refreshToken) {
-    throw new Error('Start Antigravity and try again.');
+  if (tokens.length === 0 && !oauthTokens.refreshToken) {
+    throw new Error(usingCli
+      ? 'AGY CLI credentials have expired. Run "agy models" in a terminal to check your sign-in, then retry.'
+      : 'Start Antigravity and try again.');
   }
 
   let cloudData: any | null = null;
@@ -812,8 +910,26 @@ export async function probeAntigravity(): Promise<{ plan?: string | null; lines:
     }
   }
 
-  if (!cloudData && dbTokens?.refreshToken && (sawAuthFailure || tokens.length === 0)) {
-    const refreshed = await refreshAccessToken(dbTokens.refreshToken);
+  if (!cloudData && oauthTokens.refreshToken && (sawAuthFailure || tokens.length === 0)) {
+    let refreshed: string | null = null;
+    if (usingCli) {
+      const renewed = await renewWindowsCliTokens();
+      if (renewed?.accessToken && (renewed.expirySeconds === null
+        || renewed.expirySeconds > Math.floor(Date.now() / 1000))) {
+        refreshed = renewed.accessToken;
+      }
+    }
+    if (!refreshed) {
+      if (!process.env.USAGEDOCK_ANTIGRAVITY_GOOGLE_CLIENT_ID?.trim()
+        || !process.env.USAGEDOCK_ANTIGRAVITY_GOOGLE_CLIENT_SECRET?.trim()) {
+        throw new Error(usingCli
+          ? 'AGY CLI could not renew Antigravity credentials. Run "agy models" in a terminal to check your sign-in, then retry.'
+          : 'Antigravity OAuth refresh requires USAGEDOCK_ANTIGRAVITY_GOOGLE_CLIENT_ID '
+            + 'and USAGEDOCK_ANTIGRAVITY_GOOGLE_CLIENT_SECRET in the VS Code extension host environment. '
+            + 'Configure both or sign in again.');
+      }
+      refreshed = await refreshAccessToken(oauthTokens.refreshToken);
+    }
     if (refreshed) {
       const nextData = await probeCloudCode(refreshed);
       if (nextData && !nextData._authFailed) {
@@ -829,5 +945,7 @@ export async function probeAntigravity(): Promise<{ plan?: string | null; lines:
     }
   }
 
-  throw new Error('Start Antigravity and try again.');
+  throw new Error(usingCli
+    ? 'Antigravity quota is unavailable through AGY CLI. Run "agy models" in a terminal to check your sign-in, then retry.'
+    : 'Start Antigravity and try again.');
 }
